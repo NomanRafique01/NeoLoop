@@ -22,11 +22,14 @@ function disableWinQuickEdit(): void {
       "$d=@'",
       'using System;using System.Runtime.InteropServices;',
       'public static class _QE{',
-      '[DllImport("kernel32.dll")]public static extern IntPtr GetStdHandle(int n);',
-      '[DllImport("kernel32.dll")]public static extern bool GetConsoleMode(IntPtr h,out uint m);',
-      '[DllImport("kernel32.dll")]public static extern bool SetConsoleMode(IntPtr h,uint m);',
+      '[DllImport("kernel32.dll",CharSet=CharSet.Auto,SetLastError=true)]',
+      'public static extern IntPtr CreateFile(string f,uint da,uint sm,IntPtr sa,uint cd,uint fa,IntPtr tf);',
+      '[DllImport("kernel32.dll",SetLastError=true)]public static extern bool GetConsoleMode(IntPtr h,out uint m);',
+      '[DllImport("kernel32.dll",SetLastError=true)]public static extern bool SetConsoleMode(IntPtr h,uint m);',
       'public static void Disable(){',
-      'IntPtr h=GetStdHandle(-10);uint m=0;',
+      'IntPtr h=CreateFile("CONIN$",0x80000000u|0x40000000u,1|2,IntPtr.Zero,3,0,IntPtr.Zero);',
+      'if(h==(IntPtr)(-1))return;',
+      'uint m=0;',
       'if(GetConsoleMode(h,out m)){SetConsoleMode(h,(m&~0x0040u)|0x0080u);}',
       '}}',
       "'@",
@@ -36,7 +39,7 @@ function disableWinQuickEdit(): void {
 
     const b64 = Buffer.from(psScript, 'utf16le').toString('base64');
     spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-EncodedCommand', b64], {
-      stdio: 'ignore',
+      stdio: 'inherit',
       timeout: 3000,
     });
   } catch {
@@ -726,7 +729,7 @@ export function runSplash({
       out.off('resize', init);
       inp.off('data', onData);
       process.off('exit', cleanup);
-      out.write('\x1b[0m\x1b[?25h\x1b[?1049l');
+      out.write('\x1b[?1000l\x1b[0m\x1b[?25h\x1b[?1049l');
       try { inp.setRawMode(false); } catch { /* ignore */ }
       inp.pause();
     }
@@ -822,7 +825,7 @@ export function runSplash({
     // Force UTF-8 output so box-drawing characters render correctly in both
     // CMD and PowerShell (PowerShell defaults to the system OEM code page).
     out.write('\x1b%G');   // ESC % G  — switch terminal to UTF-8 mode
-    out.write('\x1b[?1049h\x1b[?25l');
+    out.write('\x1b[?1049h\x1b[?25l\x1b[?1000h');
     init();
     out.on('resize', init);
     process.on('exit', cleanup);

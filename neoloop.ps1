@@ -280,8 +280,8 @@ try {
 using System;
 using System.Runtime.InteropServices;
 public static class Win32QuickEdit {
-    [DllImport("kernel32.dll", SetLastError = true)]
-    public static extern IntPtr GetStdHandle(int nStdHandle);
+    [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    public static extern IntPtr CreateFile(string f, uint da, uint sm, IntPtr sa, uint cd, uint fa, IntPtr tf);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern bool GetConsoleMode(IntPtr hConsoleHandle, out uint lpMode);
@@ -290,7 +290,8 @@ public static class Win32QuickEdit {
     public static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
 
     public static uint Disable() {
-        IntPtr h = GetStdHandle(-10); // STD_INPUT_HANDLE
+        IntPtr h = CreateFile("CONIN$", 0x80000000u | 0x40000000u, 1 | 2, IntPtr.Zero, 3, 0, IntPtr.Zero);
+        if (h == (IntPtr)(-1)) return 0;
         uint mode = 0;
         if (GetConsoleMode(h, out mode)) {
             // 0x0040 = ENABLE_QUICK_EDIT_MODE, 0x0080 = ENABLE_EXTENDED_FLAGS
@@ -302,8 +303,10 @@ public static class Win32QuickEdit {
 
     public static void Restore(uint mode) {
         if (mode != 0) {
-            IntPtr h = GetStdHandle(-10);
-            SetConsoleMode(h, mode | 0x0080u);
+            IntPtr h = CreateFile("CONIN$", 0x80000000u | 0x40000000u, 1 | 2, IntPtr.Zero, 3, 0, IntPtr.Zero);
+            if (h != (IntPtr)(-1)) {
+                SetConsoleMode(h, mode | 0x0080u);
+            }
         }
     }
 }
