@@ -1,0 +1,21 @@
+{
+  "name": "neoloop",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "NeoLoop — Terminal-native AI coding agent CLI",
+  "scripts": {
+    "start":     "tsx neoloop.tsx",
+    "dev":       "tsx neoloop.tsx",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "ink":   "^5.0.1",
+    "react": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node":  "^22.0.0",
+    "@types/react": "^18.3.0",
+    "tsx":          "^4.19.0",
+    "typescript":   "^5.6.0"
+  }
+}
