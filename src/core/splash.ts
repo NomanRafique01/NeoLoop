@@ -1751,8 +1751,117 @@ export function runSplash({
         return;
       }
 
-      // ── Ignore clicks and drags (only handle wheel) ────────────────────────
-      if (action.type === 'right-click' || action.type === 'left-click') {
+      // ── Mouse click handling ────────────────────────────────────────────────
+      if (action.type === 'left-click' || action.type === 'right-click') {
+        // If all text was selected (via Ctrl+A), clicking anywhere unselects it (like real editors)
+        if (isSelectedAll) {
+          isSelectedAll = false;
+        }
+
+        // If context menu is active: handle item click or dismiss
+        if (mode === 'contextMenu') {
+          const MENU_WIDTH = 16;
+          const MENU_HEIGHT = CONTEXT_MENU_ITEMS.length + 2;
+          const mx = Math.min(contextMenuX, Math.max(0, W - MENU_WIDTH - 2));
+          const my = Math.min(contextMenuY, Math.max(0, H - MENU_HEIGHT));
+
+          if (
+            action.x >= mx &&
+            action.x < mx + MENU_WIDTH + 2 &&
+            action.y >= my + 1 &&
+            action.y <= my + CONTEXT_MENU_ITEMS.length
+          ) {
+            const itemIdx = action.y - (my + 1);
+            if (CONTEXT_MENU_ITEMS[itemIdx]) {
+              executeContextMenuAction(CONTEXT_MENU_ITEMS[itemIdx]!.action);
+              draw();
+              return;
+            }
+          }
+          mode = prevMode;
+          draw();
+          return;
+        }
+
+        // Right-click: open context menu at click location
+        if (action.type === 'right-click') {
+          if (mode === 'input' || mode === 'slashMenu') {
+            prevMode = mode;
+            mode = 'contextMenu';
+            contextMenuX = action.x;
+            contextMenuY = action.y;
+            contextMenuSelectedIndex = 0;
+            draw();
+            return;
+          }
+        }
+
+        // Left-click:
+        if (action.type === 'left-click') {
+          // If theme picker is active, allow clicking on theme rows
+          if (mode === 'themePicker') {
+            const filtered = getFilteredThemes();
+            const pickerStartY = streamH + barHeight + 2;
+            const listStartY = pickerStartY + 2;
+            const listHeight = Math.max(1, Math.max(0, H - pickerStartY) - 2);
+            if (action.y >= listStartY && action.y < listStartY + listHeight) {
+              const clickedRow = action.y - listStartY;
+              const targetIdx = themePickerScrollOffset + clickedRow;
+              if (targetIdx >= 0 && targetIdx < filtered.length) {
+                const selected = filtered[targetIdx]!;
+                setCurrentTheme(selected, true);
+                mode = 'input';
+                filterQuery = '';
+                logBuffer.log(`Theme set to ${selected.name}`);
+                draw();
+                return;
+              }
+            }
+            draw();
+            return;
+          }
+
+          // If in slash menu:
+          if (mode === 'slashMenu') {
+            const menuStartY = streamH + barHeight + 2;
+            const matching = getMatchingCommands();
+            if (action.y >= menuStartY && action.y < menuStartY + matching.length) {
+              const chosen = matching[action.y - menuStartY]!;
+              inputBuffer = chosen.name;
+              cursorIdx = inputBuffer.length;
+              mode = 'input';
+              autoScrollToCursor();
+              draw();
+              return;
+            }
+            // Clicked outside slash menu options -> close slash menu
+            mode = 'input';
+          }
+
+          // If clicked inside input bar rows, place cursor at the clicked position (like real editors)
+          const inputContentStartY = streamH + 1;
+          const inputContentEndY = streamH + barHeight;
+          if (action.y >= inputContentStartY && action.y <= inputContentEndY) {
+            const textCols = Math.max(1, W - 7);
+            const { rows: vRows } = getVisualInputRows(textCols);
+            const rowOffset = action.y - inputContentStartY;
+            const targetVisualRowIdx = inputScrollTop + rowOffset;
+            if (targetVisualRowIdx >= 0 && targetVisualRowIdx < vRows.length) {
+              const vRow = vRows[targetVisualRowIdx]!;
+              const textStartX = 4;
+              const colOffset = action.x - textStartX;
+              if (colOffset <= 0) {
+                cursorIdx = vRow.startIdx;
+              } else {
+                const clampedCol = Math.min(colOffset, vRow.text.length);
+                cursorIdx = vRow.startIdx + clampedCol;
+              }
+              autoScrollToCursor();
+            }
+          }
+        }
+
+        draw();
         return;
       }
 
@@ -1915,6 +2024,15 @@ export function runSplash({
           } else {
             mode = 'input';
           }
+          return;
+        }
+
+        if (action.type === 'newline') {
+          inputBuffer = inputBuffer.slice(0, cursorIdx) + '\n' + inputBuffer.slice(cursorIdx);
+          cursorIdx++;
+          mode = 'input';
+          autoScrollToCursor();
+          draw();
           return;
         }
 
@@ -2294,6 +2412,7 @@ export function runSplash({
           cursorIdx++;
         }
         autoScrollToCursor();
+        draw();
         return;
       }
 

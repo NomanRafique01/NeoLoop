@@ -117,7 +117,7 @@ export function parseKeyActions(buf: Buffer | string): KeyAction[] {
       const btn = rawBtn & 3; // mask lower 2 bits for button
       if (btn === 2) {
         actions.push({ type: 'right-click', x: mx, y: my });
-      } else if (btn === 0) {
+      } else if (btn === 0 || btn === 1) {
         actions.push({ type: 'left-click', x: mx, y: my });
       }
     }
@@ -157,7 +157,7 @@ export function parseKeyActions(buf: Buffer | string): KeyAction[] {
         const btn = cb & 3;
         if (btn === 2) {
           actions.push({ type: 'right-click', x: cx, y: cy });
-        } else if (btn === 0) {
+        } else if (btn === 0 || btn === 1) {
           actions.push({ type: 'left-click', x: cx, y: cy });
         }
       }
@@ -207,17 +207,70 @@ export function parseKeyActions(buf: Buffer | string): KeyAction[] {
       const rest = s.slice(i);
 
       // Shift+Enter / Alt+Enter / Ctrl+Enter: newline action
-      if (rest.startsWith('\x1b[13;2u') || rest.startsWith('\x1b[13;3u') || rest.startsWith('\x1b[13;5u')) {
-        actions.push({ type: 'newline' });
-        i += 6;
+      // CSI u: \x1b[13;<mod>u or \x1b[13;<mod>;<event>u (Kitty keyboard protocol)
+      const csiUEnterMatch = /^\x1b\[13;(\d+)(?:;\d+)?u/.exec(rest);
+      if (csiUEnterMatch) {
+        const mod = parseInt(csiUEnterMatch[1]!, 10);
+        if (mod > 1) {
+          actions.push({ type: 'newline' });
+        } else {
+          actions.push({ type: 'enter' });
+        }
+        i += csiUEnterMatch[0].length;
         continue;
       }
-      if (rest.startsWith('\x1b[27;2;13~') || rest.startsWith('\x1b[27;5;13~')) {
+
+      // CSI u LineFeed: \x1b[10;...u or \x1b[10u
+      const csiULFMatch = /^\x1b\[10(?:;(\d+))*(?:;\d+)?u/.exec(rest);
+      if (csiULFMatch) {
         actions.push({ type: 'newline' });
-        i += 9;
+        i += csiULFMatch[0].length;
         continue;
       }
+
+      // Xterm modifyOtherKeys Enter: \x1b[27;<mod>;13~
+      const xtermEnterMatch = /^\x1b\[27;(\d+);13~/.exec(rest);
+      if (xtermEnterMatch) {
+        const mod = parseInt(xtermEnterMatch[1]!, 10);
+        if (mod > 1) {
+          actions.push({ type: 'newline' });
+        } else {
+          actions.push({ type: 'enter' });
+        }
+        i += xtermEnterMatch[0].length;
+        continue;
+      }
+
+      // Xterm modifyOtherKeys LineFeed: \x1b[27;<mod>;10~
+      const xtermLFMatch = /^\x1b\[27;(\d+);10~/.exec(rest);
+      if (xtermLFMatch) {
+        actions.push({ type: 'newline' });
+        i += xtermLFMatch[0].length;
+        continue;
+      }
+
+      // CSI ~ Enter: \x1b[13;<mod>~
+      const csiTildeEnterMatch = /^\x1b\[13;(\d+)~/.exec(rest);
+      if (csiTildeEnterMatch) {
+        const mod = parseInt(csiTildeEnterMatch[1]!, 10);
+        if (mod > 1) {
+          actions.push({ type: 'newline' });
+        } else {
+          actions.push({ type: 'enter' });
+        }
+        i += csiTildeEnterMatch[0].length;
+        continue;
+      }
+
+      // Keypad Enter in application mode / VT sequence
       if (rest.startsWith('\x1bOM')) {
+        actions.push({ type: 'newline' });
+        i += 3;
+        continue;
+      }
+
+      // Alt/Meta/Escape + Return
+      if (rest.startsWith('\x1b\r\n')) {
         actions.push({ type: 'newline' });
         i += 3;
         continue;
@@ -389,14 +442,21 @@ export function parseKeyActions(buf: Buffer | string): KeyAction[] {
       continue;
     }
 
-    // Enter / Return (\r, \n, \r\n)
-    if (s[i] === '\r' || s[i] === '\n') {
+    // CRLF (\r\n) or CR (\r) — Normal Enter / Send
+    if (s[i] === '\r') {
       actions.push({ type: 'enter' });
-      if (s[i] === '\r' && s[i + 1] === '\n') {
+      if (s[i + 1] === '\n') {
         i += 2;
       } else {
         i++;
       }
+      continue;
+    }
+
+    // Bare Line Feed (\n / 0x0A) — Shift+Enter / Ctrl+J newline (like WhatsApp)
+    if (s[i] === '\n') {
+      actions.push({ type: 'newline' });
+      i++;
       continue;
     }
 

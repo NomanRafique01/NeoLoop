@@ -35,6 +35,14 @@ function NonTTYApp() {
   const [isSelectedAll, setIsSelectedAll] = useState(false);
 
   useInput((ch, key) => {
+    // Mouse click event or sequence: unselect if selected all
+    if (ch && (ch.includes('\x1b[<') || ch.includes('\x1b[M'))) {
+      if (isSelectedAll) {
+        setIsSelectedAll(false);
+      }
+      return;
+    }
+
     // Ctrl + A: select all text in input bar
     if (key.ctrl && (ch === 'a' || ch === '\x01')) {
       if (input.length > 0) {
@@ -88,7 +96,18 @@ function NonTTYApp() {
       return;
     }
 
-    // Enter / Return: submit command
+    // Shift + Enter / Linefeed: change line like WhatsApp instead of sending
+    if ((key.return && key.shift) || (ch === '\n' && !key.return)) {
+      if (isSelectedAll) {
+        setInput('\n');
+        setIsSelectedAll(false);
+      } else {
+        setInput(prev => prev + '\n');
+      }
+      return;
+    }
+
+    // Enter / Return (without shift): submit command
     if (key.return) {
       setIsSelectedAll(false);
       const trimmed = input.trim();
