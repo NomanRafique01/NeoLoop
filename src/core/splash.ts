@@ -548,7 +548,8 @@ export function runSplash({
       if (!inputVisible) return;
 
       const ruleWidth = Math.max(1, W - 2);
-      const dashedRule = '╌'.repeat(ruleWidth);
+      // '---  ' pattern: longer dashes with wider spacing, works in CMD + PowerShell
+      const dashedRule = '-'.repeat(ruleWidth);
 
       // helper: write a string into chars/colors at a given row
       const writeRow = (y: number, startX: number, text: string, color: string) => {
@@ -688,7 +689,7 @@ export function runSplash({
       inp.off('data', onData);
       process.off('exit', cleanup);
       out.write('\x1b[0m\x1b[?25h\x1b[?1049l');
-      if (inp.isTTY) inp.setRawMode(false);
+      try { inp.setRawMode(false); } catch { /* ignore */ }
       inp.pause();
     }
 
@@ -779,11 +780,16 @@ export function runSplash({
     }
 
     // ── boot ───────────────────────────────────────────────────────────────
+    // Force UTF-8 output so box-drawing characters render correctly in both
+    // CMD and PowerShell (PowerShell defaults to the system OEM code page).
+    out.write('\x1b%G');   // ESC % G  — switch terminal to UTF-8 mode
     out.write('\x1b[?1049h\x1b[?25l');
     init();
     out.on('resize', init);
     process.on('exit', cleanup);
-    if (inp.isTTY) inp.setRawMode(true);
+    // PowerShell may report isTTY as undefined even on a real console handle;
+    // attempt setRawMode regardless and silently ignore if the handle refuses.
+    try { inp.setRawMode(true); } catch { /* non-TTY pipe — input still works */ }
     inp.resume();
     inp.on('data', onData);
 

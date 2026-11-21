@@ -17,8 +17,14 @@ import { WelcomeScreen } from './src/ui/index.js';
 const APP_NAME = 'NEOLOOP';
 const TAGLINE  = 'THINK. CODE. EXECUTE.';
 
+// PowerShell + CMD both expose a real TTY — but when npm spawns tsx as a child
+// process on some shells (PowerShell in particular), isTTY can come back
+// undefined even though the terminal is fully interactive.  We detect a live
+// terminal by the presence of stdout.columns (always set when a real console
+// is attached) and fall through to the full splash unless explicitly opted out.
+const hasTTY = process.stdout.isTTY === true || (process.stdout.columns ?? 0) > 0;
 const SKIP_SPLASH =
-  !process.stdout.isTTY ||
+  !hasTTY ||
   Boolean(process.env.NO_COLOR) ||
   process.argv.includes('--no-splash');
 

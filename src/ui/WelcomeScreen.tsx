@@ -75,7 +75,8 @@ interface InputBarProps {
 function InputBar({ value, showPlaceholder, cols }: InputBarProps) {
   // subtract 2 for the 1-char left + right padding inside the bar
   const ruleWidth = Math.max(1, cols - 2);
-  const dashedRule = '╌'.repeat(ruleWidth);
+  // '---  ' pattern: longer dashes with wider spacing, works in CMD + PowerShell
+  const dashedRule = '-'.repeat(ruleWidth);
 
   return (
     <Box flexDirection="column">
