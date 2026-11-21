@@ -1,13 +1,14 @@
 /**
  * NeoLoop CLI — Main Entrypoint
  *
- * Boots the terminal splash screen then renders the interactive welcome UI
- * with the terminal-style input bar. Keyboard handling drives the agent
- * execution flow: Enter submits, Backspace/Delete edits, Ctrl-C exits.
+ * Terminal-native CLI with persistent cyberpunk matrix animation,
+ * anchored ASCII typography and tagline shimmer, dotted rain boundary,
+ * and live input bar. As user inputs commands and the tool proceeds,
+ * logs scroll down below while the splash screen stays permanently anchored.
  */
 import React, { useState } from 'react';
 import { render, useInput } from 'ink';
-import { runSplash, printBanner } from './src/core/index.js';
+import { runSplash } from './src/core/index.js';
 import { WelcomeScreen } from './src/ui/index.js';
 
 // ---------------------------------------------------------------------------
@@ -22,41 +23,25 @@ const SKIP_SPLASH =
   process.argv.includes('--no-splash');
 
 // ---------------------------------------------------------------------------
-// Root App — keyboard handling + agent execution hook
+// Fallback Ink App for non-TTY / no-color environments
 // ---------------------------------------------------------------------------
-function App({ initialInput }: { initialInput: string }) {
-  const [input,   setInput]   = useState(initialInput);
+function NonTTYApp() {
+  const [input, setInput] = useState('');
   const [history, setHistory] = useState<string[]>([]);
 
   useInput((ch, key) => {
-    // ── Global exits ──────────────────────────────────────────────────────
     if (key.ctrl && ch === 'c') process.exit(0);
-
-    // ── Ignore modifier-only or escape sequences ──────────────────────────
-    if (key.meta) return;
-    if (key.escape || key.tab) return;
-
-    // ── Enter — submit through agent execution flow ───────────────────────
     if (key.return) {
       const trimmed = input.trim();
-      if (trimmed) {
-        // TODO: wire trimmed into the coding-agent execution engine
-        setHistory(prev => [...prev, trimmed]);
-      }
+      if (trimmed) setHistory(prev => [...prev, trimmed]);
       setInput('');
       return;
     }
-
-    // ── Backspace / Delete ────────────────────────────────────────────────
     if (key.backspace || key.delete) {
       setInput(prev => prev.slice(0, -1));
       return;
     }
-
-    // ── Printable character ───────────────────────────────────────────────
-    if (ch) {
-      setInput(prev => prev + ch);
-    }
+    if (ch) setInput(prev => prev + ch);
   });
 
   return <WelcomeScreen input={input} history={history} />;
@@ -65,12 +50,19 @@ function App({ initialInput }: { initialInput: string }) {
 // ---------------------------------------------------------------------------
 // Bootstrap
 // ---------------------------------------------------------------------------
-const firstKey = SKIP_SPLASH
-  ? ''
-  : await runSplash({ title: APP_NAME, tagline: TAGLINE });
-
-// After the alternate-buffer splash exits, re-print the logo statically on
-// the main buffer so it stays anchored above the Ink-managed input bar.
-if (!SKIP_SPLASH) printBanner(APP_NAME, TAGLINE);
-
-render(<App initialInput={firstKey} />);
+if (SKIP_SPLASH) {
+  render(<NonTTYApp />);
+} else {
+  // Splash screen stays permanently anchored and animated at 20 FPS.
+  // Input bar sits just under the rain with the colored dotted separator.
+  // Output logs scroll down naturally below as commands execute.
+  await runSplash({
+    title: APP_NAME,
+    tagline: TAGLINE,
+    onCommand: async (cmd, log) => {
+      // Wire command into coding-agent execution flow
+      log(`[neoloop] processing: "${cmd}"`);
+      // Future agent step outputs scroll down below here
+    },
+  });
+}

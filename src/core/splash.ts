@@ -10,7 +10,16 @@ export interface SplashOptions {
   title: string;
   tagline?: string;
   hint?: string;
+  onCommand?: (command: string, log: (text: string) => void) => void | Promise<void>;
+  initialLogs?: string[];
 }
+
+// ---------------------------------------------------------------------------
+// Input Bar Layout Constants
+// ---------------------------------------------------------------------------
+// Number of terminal rows reserved at the very bottom for the input bar.
+// Layout (3 rows):  top-rule | prompt row | bottom-rule
+const INPUT_BAR_ROWS = 3;
 
 const FPS = 20;
 const LOGO_BODY = '#39ff6a';
@@ -88,6 +97,7 @@ interface StreamState {
   chars: string[];
   colors: string[];
   tick: number;
+  hasHitBottom: boolean;
 }
 
 function newDrop(h: number, x: number, initialPause = 0): Drop {
@@ -121,6 +131,7 @@ function createStream(w: number, h: number): StreamState {
     chars: new Array(w * h).fill(' '),
     colors: new Array(w * h).fill(''),
     tick: 0,
+    hasHitBottom: false,
   };
 
   const numLanes = Math.max(1, Math.floor(w / LANE_SPACING));
@@ -168,6 +179,7 @@ function stepStream(state: StreamState): void {
           d.y = d.floorY;
           d.landed = true;
           d.splash = 0;
+          state.hasHitBottom = true;
         }
       } else {
         d.tailY++;
@@ -368,10 +380,23 @@ export function printBanner(title: string, tagline: string): void {
 // ---------------------------------------------------------------------------
 // Main Splash Lifecycle
 // ---------------------------------------------------------------------------
+
+// Theme colours shared by the input bar rendered inside the splash
+const BAR_BORDER  = '#39ff6a';   // bright green rule lines
+const BAR_DOTTED  = '#39ff6a';   // proper colour dotted line where rain is ending
+const BAR_PROMPT  = '#39ff6a';   // ">" glyph
+const BAR_TYPED   = '#39FF88';   // typed text
+const BAR_HOLDER  = '#1f9e47';   // placeholder / muted hint
+const BAR_CURSOR  = '#d7ffe1';   // blinking block
+const BAR_PLACEHOLDER = 'Type your message or ask NEOLOOP anything...';
+const CURSOR_BLINK_MS = 530;
+
 export function runSplash({
   title,
   tagline = 'THINK. CODE. EXECUTE.',
   hint = '',
+  onCommand,
+  initialLogs = [],
 }: SplashOptions): Promise<string> {
   return new Promise(resolve => {
     const out = process.stdout;
@@ -379,7 +404,7 @@ export function runSplash({
 
     let W = 0;
     let H = 0;
-    let streamH = 0;
+    let streamH = 0;           // matrix rain only fills rows 0 .. streamH-1
     let stream: StreamState | null = null;
     let chars: string[] = [];
     let colors: string[] = [];
@@ -390,51 +415,69 @@ export function runSplash({
     let running = true;
     let timer: NodeJS.Timeout | undefined;
 
+    // ── input-bar & tool log state ─────────────────────────────────────────
+    let inputVisible  = false;   // only appears AFTER matrix rain starts
+    let inputBuffer   = '';      // characters typed by user
+    let cursorIdx     = 0;       // active cursor position in inputBuffer
+    let cursorOn      = true;    // blinking cursor phase
+    let cursorTimer: NodeJS.Timeout | undefined;
+    const logs: string[] = [...initialLogs];
+
     const LETTER_FRAMES = 3;
-    const titleDoneFrame = title.length * LETTER_FRAMES;
-    const tagStartFrame = titleDoneFrame + 4;
-    const TAG_SPEED = 2;
-    const tagDoneFrame = tagStartFrame + Math.ceil(tagline.length / TAG_SPEED);
-    const hintStartFrame = hint ? tagDoneFrame + 3 : tagDoneFrame;
+    const titleDoneFrame  = title.length * LETTER_FRAMES;
+    const tagStartFrame   = titleDoneFrame + 4;
+    const TAG_SPEED       = 2;
+    const tagDoneFrame    = tagStartFrame + Math.ceil(tagline.length / TAG_SPEED);
+    const hintStartFrame  = hint ? tagDoneFrame + 3 : tagDoneFrame;
     const streamStartFrame = hint ? hintStartFrame + 3 : tagDoneFrame + 3;
 
-    function init() {
+    // ── layout helpers ─────────────────────────────────────────────────────
+    function recalcLayout() {
       W = Math.max(20, (out.columns || 80) - 1);
       H = Math.max(8, out.rows || 24);
 
       const sampleLines = buildLines(title, tagline, hint, HINT_ON, W, H);
       const y0 = Math.max(0, Math.floor(H / 4 - sampleLines.length / 2));
-      streamH = Math.min(H, y0 + sampleLines.length);
+      const fullBig = bigLogo(title);
+      const logoH = fullBig ? fullBig.length : 1;
+      const tagRow = y0 + (fullBig ? logoH + 1 : 2);
 
+      // Rain stops at the tagline row (no rain under the tagline or under the logo)
+      streamH = Math.min(Math.max(6, H - 4), tagRow + 1);
+    }
+
+    function init() {
+      recalcLayout();
       stream = frame >= streamStartFrame ? createStream(W, streamH) : null;
-      chars = new Array(W * H).fill(' ');
+      chars  = new Array(W * H).fill(' ');
       colors = new Array(W * H).fill('');
-      prevC = new Array(W * H).fill(null);
-      prevK = new Array(W * H).fill(null);
+      prevC  = new Array(W * H).fill(null);
+      prevK  = new Array(W * H).fill(null);
       lastFull = Date.now();
       out.write('\x1b[0m\x1b[2J\x1b[H');
     }
 
+    // ── paint the logo + tagline into chars/colors ─────────────────────────
     function paintContent() {
       const fullLines = buildLines(title, tagline, hint, HINT_ON, W, H);
       const y0 = Math.max(0, Math.floor(H / 4 - fullLines.length / 2));
-      const fullBig = bigLogo(title);
+      const fullBig  = bigLogo(title);
       const fullLogoW = fullBig && fullBig[0] ? fullBig[0].length : title.length;
-      const x0_logo = Math.max(0, Math.floor((W - fullLogoW) / 2));
+      const x0_logo  = Math.max(0, Math.floor((W - fullLogoW) / 2));
 
       const widest = Math.max(...fullLines.map(l => l.text.length));
       const cx0 = Math.max(0, Math.floor((W - widest) / 2) - 3);
       const cx1 = Math.min(W, Math.floor((W + widest) / 2) + 3);
-      for (let y = Math.max(0, y0 - 1); y < Math.min(streamH, y0 + fullLines.length); y++) {
+      for (let y = Math.max(0, y0 - 1); y < streamH; y++) {
         for (let x = cx0; x < cx1; x++) {
-          chars[y * W + x] = ' ';
+          chars[y * W + x]  = ' ';
           colors[y * W + x] = '';
         }
       }
 
       const titleLetters = Math.min(title.length, Math.floor(frame / LETTER_FRAMES) + 1);
-      const currentTitle = title.slice(0, titleLetters);
-      const currentBig = bigLogo(currentTitle);
+      const currentTitle  = title.slice(0, titleLetters);
+      const currentBig    = bigLogo(currentTitle);
 
       if (currentBig) {
         currentBig.forEach((row, j) => {
@@ -442,7 +485,7 @@ export function runSplash({
             const c = row[k]!;
             if (c === ' ') continue;
             const idx = (y0 + j) * W + x0_logo + k;
-            chars[idx] = c;
+            chars[idx]  = c;
             colors[idx] = c === '█' ? LOGO_BODY : LOGO_SHADING;
           }
         });
@@ -450,17 +493,17 @@ export function runSplash({
 
       const tagRow = y0 + (currentBig ? currentBig.length + 1 : 2);
       if (tagline && frame >= tagStartFrame) {
-        const tagChars = Math.min(tagline.length, (frame - tagStartFrame) * TAG_SPEED);
+        const tagChars   = Math.min(tagline.length, (frame - tagStartFrame) * TAG_SPEED);
         const currentTag = tagline.slice(0, tagChars);
-        const x0_tag = Math.max(0, Math.floor((W - tagline.length) / 2));
+        const x0_tag     = Math.max(0, Math.floor((W - tagline.length) / 2));
 
         const SWEEP_FRAMES = 24;
-        const beamWidth = 4.0;
-        const span = tagline.length + beamWidth;
+        const beamWidth    = 4.0;
+        const span         = tagline.length + beamWidth;
 
         const isSweeping = frame >= tagDoneFrame;
-        const animFrame = isSweeping ? (frame - tagDoneFrame) % SWEEP_FRAMES : -1;
-        const center = isSweeping ? -beamWidth + (animFrame / SWEEP_FRAMES) * span : -999;
+        const animFrame  = isSweeping ? (frame - tagDoneFrame) % SWEEP_FRAMES : -1;
+        const center     = isSweeping ? -beamWidth + (animFrame / SWEEP_FRAMES) * span : -999;
 
         for (let k = 0; k < currentTag.length; k++) {
           const c = currentTag[k]!;
@@ -485,21 +528,97 @@ export function runSplash({
       }
 
       const hasSpacing = H - 2 >= (currentBig ? currentBig.length : 1) + 1 + (tagline ? 1 : 0) + (hint ? 2 : 0);
-      const hintRow = tagRow + (tagline ? (hasSpacing ? 2 : 1) : 1);
+      const hintRow    = tagRow + (tagline ? (hasSpacing ? 2 : 1) : 1);
       if (hint && frame >= hintStartFrame) {
-        const x0_hint = Math.max(0, Math.floor((W - hint.length) / 2));
+        const x0_hint  = Math.max(0, Math.floor((W - hint.length) / 2));
         const hintColor = (frame >> 3) & 1 ? HINT_ON : HINT_OFF;
 
         for (let k = 0; k < hint.length; k++) {
           const c = hint[k]!;
           if (c === ' ') continue;
           const idx = hintRow * W + x0_hint + k;
-          chars[idx] = c;
+          chars[idx]  = c;
           colors[idx] = hintColor;
         }
       }
     }
 
+    // ── paint dashed border input bar & tool logs (under rain) ────────────
+    function paintInputBar() {
+      if (!inputVisible) return;
+
+      const ruleWidth = Math.max(1, W - 2);
+      const dashedRule = '╌'.repeat(ruleWidth);
+
+      // helper: write a string into chars/colors at a given row
+      const writeRow = (y: number, startX: number, text: string, color: string) => {
+        if (y < 0 || y >= H) return;
+        for (let k = 0; k < text.length && startX + k < W; k++) {
+          chars[y * W + startX + k]  = text[k]!;
+          colors[y * W + startX + k] = color;
+        }
+      };
+
+      // 1) Top dashed border line
+      const topY = streamH;
+      writeRow(topY, 1, dashedRule, BAR_BORDER);
+
+      // 2) Prompt row:  "> " then placeholder/text then cursor
+      const promptY = streamH + 1;
+      writeRow(promptY, 2, '> ', BAR_PROMPT);
+      const contentX = 4;  // column after "> "
+
+      if (inputBuffer.length === 0) {
+        // placeholder + cursor at start
+        const ph = BAR_PLACEHOLDER.slice(0, Math.max(0, W - contentX - 1));
+        writeRow(promptY, contentX, ph, BAR_HOLDER);
+        // cursor at start of placeholder
+        const curX = contentX;
+        if (curX < W) {
+          chars[promptY * W + curX]  = cursorOn ? '█' : (ph[0] || ' ');
+          colors[promptY * W + curX] = cursorOn ? BAR_CURSOR : BAR_HOLDER;
+        }
+      } else {
+        // typed text + cursor navigation
+        const maxVisible = Math.max(1, W - contentX - 1);
+        let viewOffset = 0;
+        if (cursorIdx >= maxVisible) {
+          viewOffset = cursorIdx - maxVisible + 1;
+        }
+        const visible = inputBuffer.slice(viewOffset, viewOffset + maxVisible);
+        writeRow(promptY, contentX, visible, BAR_TYPED);
+
+        const curX = contentX + (cursorIdx - viewOffset);
+        if (curX < W && curX >= contentX) {
+          const charUnder = (cursorIdx - viewOffset < visible.length)
+            ? visible[cursorIdx - viewOffset]!
+            : ' ';
+          chars[promptY * W + curX]  = (charUnder === ' ' && cursorOn) ? '█' : charUnder;
+          colors[promptY * W + curX] = cursorOn ? BAR_CURSOR : BAR_TYPED;
+        }
+      }
+
+      // 3) Bottom dashed rule
+      const botY = streamH + 2;
+      writeRow(botY, 1, dashedRule, BAR_BORDER);
+
+      // 4) Tool logs / execution history scrolling down below the input bar
+      const outputStartY = streamH + 3;
+      const availableRows = Math.max(0, H - outputStartY);
+
+      if (availableRows > 0 && logs.length > 0) {
+        // Show the latest availableRows lines so output scrolls down as tool proceeds
+        const visibleLogs = logs.slice(-availableRows);
+        visibleLogs.forEach((logLine, idx) => {
+          const rowY = outputStartY + idx;
+          const isHistoryCmd = logLine.startsWith('> ');
+          const logColor = isHistoryCmd ? '#1f9e47' : '#39FF88';
+          writeRow(rowY, 2, logLine.slice(0, W - 3), logColor);
+        });
+      }
+    }
+
+    // ── diff & flush ───────────────────────────────────────────────────────
     function diff(): string {
       let s = '';
       for (let y = 0; y < H; y++) {
@@ -507,29 +626,19 @@ export function runSplash({
         let x = 0;
         while (x < W) {
           let i = base + x;
-          if (chars[i] === prevC[i] && colors[i] === prevK[i]) {
-            x++;
-            continue;
-          }
+          if (chars[i] === prevC[i] && colors[i] === prevK[i]) { x++; continue; }
           let end = x;
           let gap = 0;
           for (let k = x + 1; k < W; k++) {
             i = base + k;
-            if (chars[i] !== prevC[i] || colors[i] !== prevK[i]) {
-              end = k;
-              gap = 0;
-            } else if (++gap > 4) {
-              break;
-            }
+            if (chars[i] !== prevC[i] || colors[i] !== prevK[i]) { end = k; gap = 0; }
+            else if (++gap > 4) break;
           }
           s += `\x1b[${y + 1};${x + 1}H`;
           let last = '';
           for (let k = x; k <= end; k++) {
             const key = colors[base + k]!;
-            if (key !== last) {
-              s += key ? sgr(key) : '\x1b[0m';
-              last = key;
-            }
+            if (key !== last) { s += key ? sgr(key) : '\x1b[0m'; last = key; }
             s += chars[base + k];
           }
           x = end + 1;
@@ -549,13 +658,14 @@ export function runSplash({
           for (let x = 0; x < stream.w; x++) {
             const source = y * stream.w + x;
             const target = y * W + x;
-            chars[target] = stream.chars[source]!;
+            chars[target]  = stream.chars[source]!;
             colors[target] = stream.colors[source]!;
           }
         }
       }
 
       paintContent();
+      paintInputBar();
 
       if (Date.now() - lastFull > FULL_REPAINT_MS) {
         prevC.fill(null);
@@ -568,10 +678,12 @@ export function runSplash({
       prevK = colors.slice();
     }
 
+    // ── cleanup & resolve ──────────────────────────────────────────────────
     function cleanup() {
       if (!running) return;
       running = false;
       if (timer) clearTimeout(timer);
+      if (cursorTimer) clearInterval(cursorTimer);
       out.off('resize', init);
       inp.off('data', onData);
       process.off('exit', cleanup);
@@ -580,16 +692,93 @@ export function runSplash({
       inp.pause();
     }
 
+    // ── keyboard handler ───────────────────────────────────────────────────
     function onData(buf: Buffer) {
       const s = buf.toString();
+
+      // Ctrl-C — always exits cleanly
       if (s === '\x03') {
         cleanup();
-        process.exit(130);
+        process.exit(0);
       }
-      cleanup();
-      resolve(s.startsWith('\x1b') ? '' : s.replace(/[\x00-\x1f\x7f]/g, ''));
+
+      // Input bar only accepts interaction once the rain animation has started
+      if (!inputVisible) {
+        return;
+      }
+
+      // ── Cursor navigation (never stops or pauses animation) ─────────────
+      if (s === '\x1b[D' || s === '\x1bOD') {
+        cursorIdx = Math.max(0, cursorIdx - 1);
+        return;
+      }
+      if (s === '\x1b[C' || s === '\x1bOC') {
+        cursorIdx = Math.min(inputBuffer.length, cursorIdx + 1);
+        return;
+      }
+      if (s === '\x1b[H' || s === '\x1b[1~' || s === '\x1b[7~') {
+        cursorIdx = 0;
+        return;
+      }
+      if (s === '\x1b[F' || s === '\x1b[4~' || s === '\x1b[8~') {
+        cursorIdx = inputBuffer.length;
+        return;
+      }
+      if (s === '\x1b[3~') {
+        // Delete key
+        if (cursorIdx < inputBuffer.length) {
+          inputBuffer = inputBuffer.slice(0, cursorIdx) + inputBuffer.slice(cursorIdx + 1);
+        }
+        return;
+      }
+
+      // Safely ignore all other escape / mouse / focus codes
+      if (s.startsWith('\x1b')) return;
+
+      // ── Enter: submit command (splash stays anchored & continuously animated)
+      if (s === '\r' || s === '\n') {
+        const trimmed = inputBuffer.trim();
+        if (trimmed) {
+          logs.push('> ' + trimmed);
+          const cmd = trimmed;
+          inputBuffer = '';
+          cursorIdx = 0;
+          if (onCommand) {
+            try {
+              Promise.resolve(onCommand(cmd, (msg: string) => {
+                logs.push(msg);
+              })).catch(err => {
+                logs.push(`[error] ${err?.message || err}`);
+              });
+            } catch (err: any) {
+              logs.push(`[error] ${err?.message || err}`);
+            }
+          } else {
+            logs.push(`[neoloop] processing: "${cmd}"`);
+          }
+        }
+        return;
+      }
+
+      // ── Backspace (raw mode sends \x7f or \x08) ─────────────────────────
+      if (s === '\x7f' || s === '\x08') {
+        if (cursorIdx > 0) {
+          inputBuffer = inputBuffer.slice(0, cursorIdx - 1) + inputBuffer.slice(cursorIdx);
+          cursorIdx--;
+        }
+        return;
+      }
+
+      // ── Printable characters: insert at active cursor position ──────────
+      // Typing never interrupts or pauses the animation at any cost!
+      const printable = s.replace(/[\x00-\x1f\x7f]/g, '');
+      if (printable) {
+        inputBuffer = inputBuffer.slice(0, cursorIdx) + printable + inputBuffer.slice(cursorIdx);
+        cursorIdx += printable.length;
+      }
     }
 
+    // ── boot ───────────────────────────────────────────────────────────────
     out.write('\x1b[?1049h\x1b[?25l');
     init();
     out.on('resize', init);
@@ -597,6 +786,9 @@ export function runSplash({
     if (inp.isTTY) inp.setRawMode(true);
     inp.resume();
     inp.on('data', onData);
+
+    // cursor blink timer — independent of the render loop
+    cursorTimer = setInterval(() => { cursorOn = !cursorOn; }, CURSOR_BLINK_MS);
 
     (function loop() {
       if (!running) return;
@@ -608,6 +800,11 @@ export function runSplash({
           stream = createStream(W, streamH);
         }
         stepStream(stream);
+
+        // Input bar appears only when the first rain column hits bottom / splashes
+        if (stream.hasHitBottom) {
+          inputVisible = true;
+        }
       }
 
       draw();

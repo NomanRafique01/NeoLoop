@@ -75,14 +75,14 @@ interface InputBarProps {
 function InputBar({ value, showPlaceholder, cols }: InputBarProps) {
   // subtract 2 for the 1-char left + right padding inside the bar
   const ruleWidth = Math.max(1, cols - 2);
-  const rule      = '─'.repeat(ruleWidth);
+  const dashedRule = '╌'.repeat(ruleWidth);
 
   return (
     <Box flexDirection="column">
 
-      {/* ── top border ── */}
+      {/* ── top dashed border ── */}
       <Box paddingLeft={1} paddingRight={1}>
-        <Text color={THEME.border}>{rule}</Text>
+        <Text color={THEME.border}>{dashedRule}</Text>
       </Box>
 
       {/* ── prompt row: > [placeholder OR typed text][cursor] ── */}
@@ -111,9 +111,9 @@ function InputBar({ value, showPlaceholder, cols }: InputBarProps) {
         )}
       </Box>
 
-      {/* ── bottom border ── */}
+      {/* ── bottom dashed border ── */}
       <Box paddingLeft={1} paddingRight={1}>
-        <Text color={THEME.border}>{rule}</Text>
+        <Text color={THEME.border}>{dashedRule}</Text>
       </Box>
 
     </Box>
