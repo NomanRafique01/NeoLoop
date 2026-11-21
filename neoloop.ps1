@@ -1,4 +1,4 @@
-﻿# NeoLoop CLI - PowerShell Edition
+# NeoLoop CLI - PowerShell Edition
 # Same interface as the CMD/Node version: matrix rain + big ASCII logo + input bar
 
 #region ── ANSI helpers ────────────────────────────────────────────────────────
