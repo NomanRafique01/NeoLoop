@@ -604,13 +604,17 @@ export function runSplash({
     let filterQuery = '';
 
     // ── Context menu state ───────────────────────────────────────────────────
-    interface ContextMenuItem { label: string; action: 'copy' | 'paste' | 'cut' | 'clear' | 'selectAll' }
+    interface ContextMenuItem {
+      label: string;
+      shortcut: string;
+      action: 'copy' | 'paste' | 'cut' | 'clear' | 'selectAll';
+    }
     const CONTEXT_MENU_ITEMS: ContextMenuItem[] = [
-      { label: 'Copy',       action: 'copy'      },
-      { label: 'Paste',      action: 'paste'     },
-      { label: 'Cut',        action: 'cut'       },
-      { label: 'Select All', action: 'selectAll' },
-      { label: 'Clear',      action: 'clear'     },
+      { label: 'Copy',       shortcut: 'Ctrl+C', action: 'copy'      },
+      { label: 'Paste',      shortcut: 'Ctrl+V', action: 'paste'     },
+      { label: 'Cut',        shortcut: 'Ctrl+X', action: 'cut'       },
+      { label: 'Select All', shortcut: 'Ctrl+A', action: 'selectAll' },
+      { label: 'Clear',      shortcut: 'Esc',    action: 'clear'     },
     ];
     let contextMenuX = 0;      // terminal column (0-based)
     let contextMenuY = 0;      // terminal row    (0-based)
@@ -1380,81 +1384,144 @@ export function runSplash({
     function paintContextMenu() {
       if (mode !== 'contextMenu') return;
 
-      // ── Derive perfectly-themed colors from the live theme ────────────────
-      // Panel background: surfaceElevated gives depth; falls back to surface
-      const panelBg   = theme.surfaceElevated || theme.surface;
-      // Border: inputBorder (neon accent line) or generic border token
-      const borderCol = theme.inputBorder || theme.border;
-      // Selected row highlight: selection swatch (Ctrl+A highlight color)
-      const selBg     = theme.selection;
-      // Label of selected item: background text color (readable on selection)
-      const selFg     = theme.background;
-      // Normal item label: primary text token
-      const itemFg    = theme.text;
-      // Footer hint: muted text token
-      const hintFg    = theme.textMuted !== theme.background ? theme.textMuted : theme.accent;
-
-      // ── Dimensions ───────────────────────────────────────────────────────
-      const MENU_WIDTH  = 16;  // inner content width (chars)
-      const MENU_HEIGHT = CONTEXT_MENU_ITEMS.length + 2; // 1 top border + items + 1 bottom border
+      const MENU_INNER_WIDTH = 24;
+      const BOX_WIDTH = MENU_INNER_WIDTH + 2;
+      const MENU_HEIGHT = CONTEXT_MENU_ITEMS.length + 2;
 
       // Clamp so the menu never bleeds off-screen
-      const mx = Math.min(contextMenuX, Math.max(0, W - MENU_WIDTH - 2));
-      const my = Math.min(contextMenuY, Math.max(0, H - MENU_HEIGHT));
+      const mx = Math.max(0, Math.min(contextMenuX, W - BOX_WIDTH));
+      const my = Math.max(0, Math.min(contextMenuY, H - MENU_HEIGHT));
 
-      // ── Paint a solid background slab first (clear previous content) ──────
+      // ── Derive perfectly-themed colors from the live theme ────────────────
+      const panelBg   = theme.surfaceElevated || theme.surface || '#12131a';
+      const borderCol = theme.inputBorder || theme.accent || theme.border;
+      const selBg     = theme.selection || theme.accent;
+
+      // High-contrast selection text
+      let selFg = '#ffffff';
+      try {
+        const rgb = parseHex(selBg);
+        const lum = 0.2126 * rgb.r + 0.7152 * rgb.g + 0.0722 * rgb.b;
+        selFg = lum > 140 ? '#0a0a0a' : '#ffffff';
+      } catch {
+        selFg = '#ffffff';
+      }
+
+      const itemFg     = theme.text || '#f0f0f0';
+      const shortcutFg = theme.textMuted || theme.accent;
+      const titleFg    = theme.accent || '#ffffff';
+      const hintFg     = theme.textMuted || theme.accent;
+
+      // ── 1) Paint a solid background slab first (clear previous content) ───
       for (let row = 0; row < MENU_HEIGHT; row++) {
-        for (let col = 0; col < MENU_WIDTH + 2; col++) {
+        for (let col = 0; col < BOX_WIDTH; col++) {
           setCell(my + row, mx + col, ' ', `BG:${panelBg};FG:${itemFg}`);
         }
       }
 
-      // ── Top border: ┌──────────────┐ ─────────────────────────────────────
-      const topBorder = '┌' + '─'.repeat(MENU_WIDTH) + '┐';
+      // ── 2) Top border with "Clipboard" title: ┌─ Clipboard ────────────┐ ──
+      const title = ' Clipboard ';
+      const topDashes = Math.max(1, BOX_WIDTH - 2 - title.length - 1);
+      const topBorder = '┌─' + title + '─'.repeat(topDashes) + '┐';
       for (let k = 0; k < topBorder.length && mx + k < W; k++) {
-        setCell(my, mx + k, topBorder[k]!, `BG:${panelBg};FG:${borderCol}`);
+        const ch = topBorder[k]!;
+        const isTitleChar = k >= 2 && k < 2 + title.length;
+        setCell(
+          my,
+          mx + k,
+          ch,
+          isTitleChar
+            ? `BG:${panelBg};FG:${titleFg};BOLD`
+            : `BG:${panelBg};FG:${borderCol}`
+        );
       }
 
-      // ── Item rows ─────────────────────────────────────────────────────────
+      // ── 3) Item rows: │ > Copy          Ctrl+C │ ──────────────────────────
       for (let i = 0; i < CONTEXT_MENU_ITEMS.length; i++) {
-        const item      = CONTEXT_MENU_ITEMS[i]!;
-        const rowY      = my + 1 + i;
+        const item = CONTEXT_MENU_ITEMS[i]!;
+        const rowY = my + 1 + i;
         const isSelected = i === contextMenuSelectedIndex;
 
-        const fg  = isSelected ? selFg  : itemFg;
-        const bg  = isSelected ? selBg  : panelBg;
-        const ptr = isSelected ? '❯' : ' ';
+        const rowBg = isSelected ? selBg : panelBg;
+        const ptr = isSelected ? '>' : ' ';
+        const shortcut = item.shortcut || '';
+        const rightMargin = ' ';
+        const spaceCount = Math.max(
+          1,
+          MENU_INNER_WIDTH - 2 - item.label.length - shortcut.length - rightMargin.length
+        );
 
         // Left border
         setCell(rowY, mx, '│', `BG:${panelBg};FG:${borderCol}`);
 
-        // Pointer glyph
-        setCell(rowY, mx + 1, ptr, `BG:${bg};FG:${isSelected ? borderCol : itemFg};BOLD`);
+        // Pointer: '>' or ' '
+        setCell(
+          rowY,
+          mx + 1,
+          ptr,
+          isSelected ? `BG:${rowBg};FG:${selFg};BOLD` : `BG:${rowBg};FG:${itemFg}`
+        );
+        // Space
+        setCell(rowY, mx + 2, ' ', `BG:${rowBg};FG:${itemFg}`);
 
-        // Label (padded to MENU_WIDTH - 2)
-        const label = item.label.padEnd(MENU_WIDTH - 2);
-        for (let k = 0; k < label.length && mx + 2 + k < W; k++) {
-          setCell(rowY, mx + 2 + k, label[k]!, `BG:${bg};FG:${fg}${isSelected ? ';BOLD' : ''}`);
+        // Label
+        let curCol = mx + 3;
+        for (let k = 0; k < item.label.length && curCol < W; k++, curCol++) {
+          setCell(
+            rowY,
+            curCol,
+            item.label[k]!,
+            isSelected ? `BG:${rowBg};FG:${selFg};BOLD` : `BG:${rowBg};FG:${itemFg}`
+          );
+        }
+
+        // Filler spaces
+        for (let k = 0; k < spaceCount && curCol < W; k++, curCol++) {
+          setCell(rowY, curCol, ' ', `BG:${rowBg};FG:${itemFg}`);
+        }
+
+        // Shortcut
+        for (let k = 0; k < shortcut.length && curCol < W; k++, curCol++) {
+          setCell(
+            rowY,
+            curCol,
+            shortcut[k]!,
+            isSelected
+              ? `BG:${rowBg};FG:${selFg};BOLD`
+              : `BG:${rowBg};FG:${shortcutFg}`
+          );
+        }
+
+        // Trailing margin
+        for (let k = 0; k < rightMargin.length && curCol < W; k++, curCol++) {
+          setCell(rowY, curCol, ' ', `BG:${rowBg};FG:${itemFg}`);
         }
 
         // Right border
-        const rCol = mx + MENU_WIDTH + 1;
+        const rCol = mx + BOX_WIDTH - 1;
         if (rCol < W) {
           setCell(rowY, rCol, '│', `BG:${panelBg};FG:${borderCol}`);
         }
       }
 
-      // ── Bottom border with hint: └────enter/esc──────┘ ───────────────────
-      const hintText = 'enter·esc';
-      const fillLen  = MENU_WIDTH - 2 - hintText.length;
-      const leftFill = Math.max(0, Math.floor(fillLen / 2));
-      const rightFill = Math.max(0, fillLen - leftFill);
-      const bottomBorder = '└' + '─'.repeat(leftFill) + hintText + '─'.repeat(rightFill) + '┘';
+      // ── 4) Bottom border with hint: └────── enter·esc ───────┘ ────────────
+      const hintText = ' enter·esc ';
+      const leftDashes = Math.max(1, Math.floor((MENU_INNER_WIDTH - hintText.length) / 2));
+      const rightDashes = Math.max(1, MENU_INNER_WIDTH - hintText.length - leftDashes);
+      const bottomBorder = '└' + '─'.repeat(leftDashes) + hintText + '─'.repeat(rightDashes) + '┘';
       const botY = my + MENU_HEIGHT - 1;
+
       for (let k = 0; k < bottomBorder.length && mx + k < W; k++) {
         const ch = bottomBorder[k]!;
-        const isHintChar = k > leftFill && k <= leftFill + hintText.length;
-        setCell(botY, mx + k, ch, `BG:${panelBg};FG:${isHintChar ? hintFg : borderCol}`);
+        const isHintChar = k > leftDashes && k <= leftDashes + hintText.length;
+        setCell(
+          botY,
+          mx + k,
+          ch,
+          isHintChar
+            ? `BG:${panelBg};FG:${hintFg}`
+            : `BG:${panelBg};FG:${borderCol}`
+        );
       }
     }
 
@@ -1474,6 +1541,7 @@ export function runSplash({
             copyToClipboard(inputBuffer);
             inputBuffer = '';
             cursorIdx   = 0;
+            inputScrollTop = 0;
             logBuffer.log('Cut to clipboard');
           }
           break;
@@ -1488,6 +1556,7 @@ export function runSplash({
                 mode = 'slashMenu';
                 slashMenuSelectedIndex = 0;
               }
+              draw();
             }
           });
           break;
@@ -1500,8 +1569,11 @@ export function runSplash({
         case 'clear':
           inputBuffer = '';
           cursorIdx   = 0;
+          inputScrollTop = 0;
           break;
       }
+      autoScrollToCursor();
+      draw();
     }
 
     function diff(): string {
@@ -1760,14 +1832,24 @@ export function runSplash({
 
         // If context menu is active: handle item click or dismiss
         if (mode === 'contextMenu') {
-          const MENU_WIDTH = 16;
+          const MENU_INNER_WIDTH = 24;
+          const BOX_WIDTH = MENU_INNER_WIDTH + 2;
           const MENU_HEIGHT = CONTEXT_MENU_ITEMS.length + 2;
-          const mx = Math.min(contextMenuX, Math.max(0, W - MENU_WIDTH - 2));
-          const my = Math.min(contextMenuY, Math.max(0, H - MENU_HEIGHT));
+          const mx = Math.max(0, Math.min(contextMenuX, W - BOX_WIDTH));
+          const my = Math.max(0, Math.min(contextMenuY, H - MENU_HEIGHT));
+
+          // Right click while menu is open: re-position menu if clicked outside
+          if (action.type === 'right-click') {
+            contextMenuX = action.x;
+            contextMenuY = action.y;
+            contextMenuSelectedIndex = 0;
+            draw();
+            return;
+          }
 
           if (
             action.x >= mx &&
-            action.x < mx + MENU_WIDTH + 2 &&
+            action.x < mx + BOX_WIDTH &&
             action.y >= my + 1 &&
             action.y <= my + CONTEXT_MENU_ITEMS.length
           ) {
@@ -1785,15 +1867,13 @@ export function runSplash({
 
         // Right-click: open context menu at click location
         if (action.type === 'right-click') {
-          if (mode === 'input' || mode === 'slashMenu') {
-            prevMode = mode;
-            mode = 'contextMenu';
-            contextMenuX = action.x;
-            contextMenuY = action.y;
-            contextMenuSelectedIndex = 0;
-            draw();
-            return;
-          }
+          prevMode = mode;
+          mode = 'contextMenu';
+          contextMenuX = action.x;
+          contextMenuY = action.y;
+          contextMenuSelectedIndex = 0;
+          draw();
+          return;
         }
 
         // Left-click:
@@ -1871,15 +1951,18 @@ export function runSplash({
       if (mode === 'contextMenu') {
         if (action.type === 'esc') {
           mode = prevMode;
+          draw();
           return;
         }
         if (action.type === 'up') {
           contextMenuSelectedIndex =
             (contextMenuSelectedIndex - 1 + CONTEXT_MENU_ITEMS.length) % CONTEXT_MENU_ITEMS.length;
+          draw();
           return;
         }
         if (action.type === 'down') {
           contextMenuSelectedIndex = (contextMenuSelectedIndex + 1) % CONTEXT_MENU_ITEMS.length;
+          draw();
           return;
         }
         if (action.type === 'enter') {
@@ -1888,6 +1971,7 @@ export function runSplash({
         }
         // Any other key dismisses the menu
         mode = prevMode;
+        draw();
         return;
       }
 
