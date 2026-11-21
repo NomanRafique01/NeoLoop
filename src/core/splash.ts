@@ -10,6 +10,7 @@
  */
 
 import { spawnSync } from 'child_process';
+import { copyToClipboard, readFromClipboard } from './clipboard.js';
 import {
   ThemeTokens,
   RainPalette,
@@ -28,9 +29,14 @@ import {
   loadSavedThemeId,
   saveThemeId,
   getThemeDisplayNameColor,
+  lerpColor,
+  loadSavedMouseEnabled,
+  saveMouseEnabled,
 } from './themes.js';
 import { COMMAND_REGISTRY, SlashCommand, CommandContext } from './commands.js';
 import { parseKeyActions, KeyAction } from './keys.js';
+import { LogBuffer, DisplayLine } from './logBuffer.js';
+import stringWidth from 'string-width';
 
 // ---------------------------------------------------------------------------
 // Windows QuickEdit guard & Console Mode
@@ -375,7 +381,9 @@ const sgrCache = new Map<string, string>();
 function sgr(key: string): string {
   let cached = sgrCache.get(key);
   if (!cached) {
-    if (key.startsWith('BG:')) {
+    if (key.startsWith('\x1b[')) {
+      cached = key;
+    } else if (key.startsWith('BG:')) {
       // Format: BG:<bgHex>;FG:<fgHex>[;BOLD]
       const parts = key.split(';');
       const bgHex = parts[0]!.slice(3);
@@ -471,12 +479,13 @@ export function runSplash({
     let timer: NodeJS.Timeout | undefined;
 
     // ── Input bar & dispatcher state ─────────────────────────────────────────
-    type Mode = 'input' | 'slashMenu' | 'themePicker';
+    type Mode = 'input' | 'slashMenu' | 'themePicker' | 'contextMenu';
     let mode: Mode = 'input';
 
     let inputVisible = false;
     let inputBuffer = '';
     let cursorIdx = 0;
+    let isSelectedAll = false;  // Ctrl+A selection state
     let cursorOn = true;
     let cursorTimer: NodeJS.Timeout | undefined;
 
@@ -485,8 +494,103 @@ export function runSplash({
     let historyIndex = -1;
     let savedDraft = '';
 
-    // Logs buffer
-    const logs: string[] = [...initialLogs];
+    // Output viewport & log buffer state
+    let scrollTop = 0;
+    let followTail = true;
+    let linesWhenLeftTail = 0;
+    let lastScrollActivityTime = Date.now();
+    let mouseEnabled = loadSavedMouseEnabled();
+
+    function setMouseMode(enabled: boolean) {
+      mouseEnabled = enabled;
+      if (running) {
+        if (mouseEnabled) {
+          out.write('\x1b[?1000h\x1b[?1006h');
+        } else {
+          out.write('\x1b[?1000l\x1b[?1006l\x1b[?1002l');
+        }
+      }
+    }
+
+    function updateScroll(newTop: number) {
+      const vRows = Math.max(0, H - (streamH + barHeight + 2));
+      const max = Math.max(0, logBuffer.lineCount - vRows);
+      const clamped = Math.max(0, Math.min(max, newTop));
+
+      if (clamped < max) {
+        if (followTail) {
+          linesWhenLeftTail = logBuffer.lineCount;
+          followTail = false;
+        }
+        scrollTop = clamped;
+      } else {
+        scrollTop = max;
+        followTail = true;
+        linesWhenLeftTail = logBuffer.lineCount;
+      }
+    }
+
+    // Scroll burst coalescing & auto-repeat acceleration state
+    let scrollRepaintTimer: NodeJS.Timeout | null = null;
+    let lastScrollRepaintTime = 0;
+    const SCROLL_COALESCE_MS = 16;
+
+    const ACCEL_TIMEOUT_MS = 150;
+    const ACCEL_MAX_STEP = 8;
+    let lastScrollTime = 0;
+    let lastScrollDir = 0;
+    let accelStep = 1;
+
+    function getScrollStep(dir: number): number {
+      const now = Date.now();
+      if (now - lastScrollTime <= ACCEL_TIMEOUT_MS && lastScrollDir === dir) {
+        accelStep = Math.min(ACCEL_MAX_STEP, accelStep + 1);
+      } else {
+        accelStep = 1;
+      }
+      lastScrollTime = now;
+      lastScrollDir = dir;
+      return accelStep;
+    }
+
+    function requestScrollRepaint() {
+      if (!running || out.writableLength > MAX_BACKLOG) return;
+
+      const now = Date.now();
+      const elapsed = now - lastScrollRepaintTime;
+
+      if (elapsed >= SCROLL_COALESCE_MS) {
+        if (scrollRepaintTimer) {
+          clearTimeout(scrollRepaintTimer);
+          scrollRepaintTimer = null;
+        }
+        lastScrollRepaintTime = now;
+        draw();
+      } else if (!scrollRepaintTimer) {
+        scrollRepaintTimer = setTimeout(() => {
+          scrollRepaintTimer = null;
+          if (!running || out.writableLength > MAX_BACKLOG) return;
+          lastScrollRepaintTime = Date.now();
+          draw();
+        }, SCROLL_COALESCE_MS - elapsed);
+      }
+    }
+
+    const logBuffer = new LogBuffer({
+      cols: Math.max(1, (out.columns || 80) - 5),
+      onDropLines: (count) => {
+        if (!followTail) {
+          scrollTop = Math.max(0, scrollTop - count);
+          linesWhenLeftTail = Math.max(0, linesWhenLeftTail - count);
+        } else {
+          linesWhenLeftTail = logBuffer.lineCount;
+        }
+      },
+    });
+
+    for (const initialLog of initialLogs) {
+      logBuffer.log(initialLog);
+    }
 
     // Slash menu state
     let slashMenuSelectedIndex = 0;
@@ -497,6 +601,20 @@ export function runSplash({
     let themePickerScrollOffset = 0;
     let filterQuery = '';
 
+    // ── Context menu state ───────────────────────────────────────────────────
+    interface ContextMenuItem { label: string; action: 'copy' | 'paste' | 'cut' | 'clear' | 'selectAll' }
+    const CONTEXT_MENU_ITEMS: ContextMenuItem[] = [
+      { label: 'Copy',       action: 'copy'      },
+      { label: 'Paste',      action: 'paste'     },
+      { label: 'Cut',        action: 'cut'       },
+      { label: 'Select All', action: 'selectAll' },
+      { label: 'Clear',      action: 'clear'     },
+    ];
+    let contextMenuX = 0;      // terminal column (0-based)
+    let contextMenuY = 0;      // terminal row    (0-based)
+    let contextMenuSelectedIndex = 0;
+    let prevMode: Mode = 'input'; // mode to restore on close
+
     const LETTER_FRAMES = 3;
     const titleDoneFrame = title.length * LETTER_FRAMES;
     const tagStartFrame = titleDoneFrame + 4;
@@ -505,10 +623,20 @@ export function runSplash({
     const hintStartFrame = hint ? tagDoneFrame + 3 : tagDoneFrame;
     const streamStartFrame = hint ? hintStartFrame + 3 : tagDoneFrame + 3;
 
-    // ── Layout helpers ───────────────────────────────────────────────────────
+    // ── Layout helpers & compact header modes ───────────────────────────────
+    type HeaderMode = 'full' | 'compact-no-rain' | 'single-line';
+    let headerMode: HeaderMode = 'full';
+
     function recalcLayout() {
-      W = Math.max(20, (out.columns || 80) - 1);
-      H = Math.max(8, out.rows || 24);
+      W = Math.max(1, (out.columns || 80) - 1);
+      H = Math.max(1, out.rows || 24);
+
+      if (W < 20 || H < 8) {
+        streamH = 0;
+        return;
+      }
+
+      logBuffer.setWidth(Math.max(1, W - 4));
 
       const sampleLines = buildLines(title, tagline, hint, theme.accent, W, H, theme);
       const y0 = Math.max(0, Math.floor(H / 4 - sampleLines.length / 2));
@@ -516,18 +644,50 @@ export function runSplash({
       const logoH = fullBig ? fullBig.length : 1;
       const tagRow = y0 + (fullBig ? logoH + 1 : 2);
 
-      streamH = Math.min(Math.max(6, H - 4), tagRow + 1);
+      const normalStreamH = Math.min(Math.max(6, H - 4), tagRow + 1);
+      const normalOutStartY = normalStreamH + barHeight + 2;
+      const normalViewportRows = H - normalOutStartY;
+
+      if (normalViewportRows >= 6) {
+        headerMode = 'full';
+        streamH = normalStreamH;
+      } else {
+        const noRainStreamH = Math.min(H - barHeight - 2, tagRow + 1);
+        const noRainViewportRows = H - (noRainStreamH + barHeight + 2);
+        if (noRainViewportRows >= 6) {
+          headerMode = 'compact-no-rain';
+          streamH = noRainStreamH;
+        } else {
+          headerMode = 'single-line';
+          streamH = 1;
+        }
+      }
     }
 
     function init() {
+      const oldScrollTop = scrollTop;
+      const oldFollowTail = followTail;
+
       recalcLayout();
-      stream = frame >= streamStartFrame ? createStream(W, streamH, rainPalettes.length) : null;
+      stream = (headerMode === 'full' && frame >= streamStartFrame)
+        ? createStream(W, streamH, rainPalettes.length)
+        : null;
       chars = new Array(W * H).fill(' ');
       colors = new Array(W * H).fill('');
       prevC = new Array(W * H).fill(null);
       prevK = new Array(W * H).fill(null);
       lastFull = Date.now();
       out.write('\x1b[0m\x1b[2J\x1b[H');
+
+      const vRows = Math.max(0, H - (streamH + barHeight + 2));
+      const maxScroll = Math.max(0, logBuffer.lineCount - vRows);
+      if (oldFollowTail) {
+        scrollTop = maxScroll;
+        followTail = true;
+      } else {
+        scrollTop = Math.max(0, Math.min(oldScrollTop, maxScroll));
+        followTail = false;
+      }
     }
 
     // Subscribe to live theme changes (e.g. from picker navigation)
@@ -552,12 +712,56 @@ export function runSplash({
     function writeRow(y: number, startX: number, text: string, col: string) {
       if (y < 0 || y >= H) return;
       for (let k = 0; k < text.length && startX + k < W; k++) {
-        setCell(y, startX + k, text[k]!, col);
+        if (startX + k >= 0) {
+          setCell(y, startX + k, text[k]!, col);
+        }
+      }
+    }
+
+    function writeStyledRow(y: number, startX: number, text: string, col: string) {
+      if (y < 0 || y >= H) return;
+      let curX = startX;
+      for (const ch of text) {
+        if (curX >= W) break;
+        const w = stringWidth(ch);
+        if (w === 0) continue;
+        if (w === 2) {
+          if (curX >= 0 && curX + 1 < W) {
+            setCell(y, curX, ch, col);
+            setCell(y, curX + 1, '', '');
+          }
+          curX += 2;
+        } else {
+          if (curX >= 0) {
+            setCell(y, curX, ch, col);
+          }
+          curX += 1;
+        }
       }
     }
 
     // ── Paint the logo + tagline into chars/colors ───────────────────────────
     function paintContent() {
+      if (headerMode === 'single-line') {
+        const titleUpper = title.toUpperCase();
+        const sep = '  |  ';
+        const tagUpper = tagline.toUpperCase();
+        const fullHeader = `${titleUpper}${sep}${tagUpper}`;
+
+        const startX = Math.max(2, Math.floor((W - fullHeader.length) / 2));
+        let curX = startX;
+
+        for (let k = 0; k < titleUpper.length && curX < W - 2; k++) {
+          setCell(0, curX++, titleUpper[k]!, theme.logo);
+        }
+        for (let k = 0; k < sep.length && curX < W - 2; k++) {
+          setCell(0, curX++, sep[k]!, theme.textMuted || '#6b7280');
+        }
+        for (let k = 0; k < tagUpper.length && curX < W - 2; k++) {
+          setCell(0, curX++, tagUpper[k]!, theme.tagline);
+        }
+        return;
+      }
       const fullLines = buildLines(title, tagline, hint, theme.accent, W, H, theme);
       const y0 = Math.max(0, Math.floor(H / 4 - fullLines.length / 2));
       const fullBig = bigLogo(title);
@@ -642,78 +846,110 @@ export function runSplash({
       }
     }
 
+    // ── Input bar geometry (recalculated each frame) ──────────────────────────
+    // barHeight = number of content rows (1 minimum, grows as text wraps)
+    let barHeight = 1;
+
+    function getInputRows(): string[] {
+      // Available text columns: W - 2 (side padding) - 2 (prompt "> ") - 2 (margins)
+      const textCols = Math.max(1, W - 6);
+      if (inputBuffer.length === 0) return [''];
+      const rows: string[] = [];
+      let remaining = inputBuffer;
+      while (remaining.length > 0) {
+        rows.push(remaining.slice(0, textCols));
+        remaining = remaining.slice(textCols);
+      }
+      return rows;
+    }
+
     // ── Paint dashed border input bar ────────────────────────────────────────
     function paintInputBar() {
       if (!inputVisible) return;
 
-      const ruleWidth = Math.max(1, W - 2);
-      const dashedRule = '-'.repeat(ruleWidth);
-
-      const borderCol = theme.inputBorder || theme.border;
-      const promptCol = theme.userTalk?.prompt || theme.accent;
+      const borderCol   = theme.inputBorder || theme.border;
+      const promptCol   = theme.userTalk?.prompt || theme.accent;
       const userTextCol = theme.userTalk?.text || theme.inputText;
-      const cursorCol = theme.cursor;
+      const selBg       = theme.selection;
+      const selFg       = theme.background;
+      const cursorCol   = theme.cursor;
       const placeholderCol = theme.inputPlaceholder;
 
-      // 1) Top dashed border line
+      const ruleWidth  = Math.max(1, W - 2);
+      const dashedRule = '-'.repeat(ruleWidth);
+      const textCols   = Math.max(1, W - 6); // columns available per text row
+      const textStartX = 4;                   // where text begins (after "> ")
+
+      // ── Compute wrapped rows and new barHeight ────────────────────────────
+      const inputRows = getInputRows();
+      barHeight = Math.max(1, inputRows.length);
+
+      // ── 1) Top dashed border ──────────────────────────────────────────────
       const topY = streamH;
       writeRow(topY, 1, dashedRule, borderCol);
 
-      // 2) Prompt row: "> " then typed text or placeholder, with cursor
-      const promptY = streamH + 1;
-      writeRow(promptY, 2, '> ', promptCol);
-
-      const cursorCellX = 4;
-      const textStartX = 4;
-      const placeholderStartX = 6;
-
+      // ── 2) Content rows ───────────────────────────────────────────────────
       if (inputBuffer.length === 0) {
-        // Blinking cursor sits at cell 4 BEFORE placeholder
-        if (cursorOn) {
-          setCell(promptY, cursorCellX, '█', cursorCol);
-        } else {
-          setCell(promptY, cursorCellX, ' ', '');
-        }
+        // Empty: single prompt row with placeholder + blinking cursor
+        const promptY = streamH + 1;
+        writeRow(promptY, 2, '> ', promptCol);
 
-        // Placeholder starts at cell 6 so every character is fully visible
-        const maxPhLen = Math.max(0, W - placeholderStartX - 2);
+        // Blinking block cursor at col 4
+        setCell(promptY, textStartX, cursorOn ? '█' : ' ', cursorOn ? cursorCol : '');
+
+        // Placeholder text starting at col 6
+        const maxPhLen = Math.max(0, W - 6 - 2);
         const ph = BAR_PLACEHOLDER.slice(0, maxPhLen);
-        writeRow(promptY, placeholderStartX, ph, placeholderCol);
+        writeRow(promptY, 6, ph, placeholderCol);
       } else {
-        const maxVisible = Math.max(1, W - textStartX - 2);
-        let viewOffset = 0;
-        if (cursorIdx >= maxVisible) {
-          viewOffset = cursorIdx - maxVisible + 1;
-        }
-        const visible = inputBuffer.slice(viewOffset, viewOffset + maxVisible);
+        // Determine which visual row+col the cursor is on
+        const cursorRow = Math.floor(cursorIdx / textCols);
+        const cursorCol_ = cursorIdx % textCols;
 
-        // Draw typed text
-        writeRow(promptY, textStartX, visible, userTextCol);
+        for (let r = 0; r < inputRows.length; r++) {
+          const rowY = streamH + 1 + r;
+          const rowText = inputRows[r]!;
+          const rowStart = r * textCols; // buffer offset where this row starts
 
-        // Draw cursor at active position
-        const curX = textStartX + (cursorIdx - viewOffset);
-        if (curX < W && curX >= textStartX) {
-          if (cursorIdx - viewOffset < visible.length) {
-            // Cursor is over a character: inverted block highlight
-            const ch = visible[cursorIdx - viewOffset]!;
-            if (cursorOn) {
-              setCell(promptY, curX, ch, `BG:${cursorCol};FG:#0a0a0a;BOLD`);
-            } else {
-              setCell(promptY, curX, ch, userTextCol);
+          // Prompt symbol only on the first row; continuation rows get indent
+          if (r === 0) {
+            writeRow(rowY, 2, '> ', promptCol);
+          } else {
+            // Visual continuation indent: "  ⋮ " styled with muted border color
+            writeRow(rowY, 2, '  ', '');
+          }
+
+          if (isSelectedAll) {
+            // ── Selection highlight: entire buffer selected ──────────────────
+            const displayText = rowText.padEnd(Math.min(rowText.length + 1, textCols));
+            for (let k = 0; k < displayText.length && textStartX + k < W; k++) {
+              setCell(rowY, textStartX + k, displayText[k]!, `BG:${selBg};FG:${selFg};BOLD`);
             }
           } else {
-            // Cursor is at end of line
-            if (cursorOn) {
-              setCell(promptY, curX, '█', cursorCol);
-            } else {
-              setCell(promptY, curX, ' ', '');
+            // ── Normal text rendering ────────────────────────────────────────
+            writeRow(rowY, textStartX, rowText, userTextCol);
+
+            // ── Cursor ───────────────────────────────────────────────────────
+            if (r === cursorRow) {
+              const curX = textStartX + cursorCol_;
+              if (curX < W) {
+                if (cursorCol_ < rowText.length) {
+                  // Over a character — inverted block
+                  const ch = rowText[cursorCol_]!;
+                  setCell(rowY, curX, ch,
+                    cursorOn ? `BG:${cursorCol};FG:#0a0a0a;BOLD` : userTextCol);
+                } else {
+                  // After text (end of line)
+                  setCell(rowY, curX, cursorOn ? '█' : ' ', cursorOn ? cursorCol : '');
+                }
+              }
             }
           }
         }
       }
 
-      // 3) Bottom dashed border line
-      const botY = streamH + 2;
+      // ── 3) Bottom dashed border (always after all content rows) ───────────
+      const botY = streamH + 1 + barHeight;
       writeRow(botY, 1, dashedRule, borderCol);
     }
 
@@ -725,7 +961,7 @@ export function runSplash({
     }
 
     function paintThemePicker() {
-      const pickerStartY = streamH + 3;
+      const pickerStartY = streamH + barHeight + 2;
       const availRows = Math.max(0, H - pickerStartY);
       if (availRows <= 2) return;
 
@@ -831,7 +1067,7 @@ export function runSplash({
     }
 
     function paintSlashMenu() {
-      const menuStartY = streamH + 3;
+      const menuStartY = streamH + barHeight + 2;
       const availRows = Math.max(0, H - menuStartY);
       if (availRows <= 1) return;
 
@@ -882,46 +1118,268 @@ export function runSplash({
 
     // ── Paint logs / terminal scrollback ─────────────────────────────────────
     function paintLogs() {
-      const outputStartY = streamH + 3;
-      const availableRows = Math.max(0, H - outputStartY);
+      const outputStartY = streamH + barHeight + 2;
+      const viewportRows = Math.max(0, H - outputStartY);
+      if (viewportRows <= 0) return;
 
-      if (availableRows > 0 && logs.length > 0) {
-        const visibleLogs = logs.slice(-availableRows);
-        const promptCol = theme.userTalk?.prompt || theme.accent;
-        const userTextCol = theme.userTalk?.text || theme.inputText;
-        const badgeCol = theme.agentTalk?.badge || theme.accentStrong;
-        const agentTextCol = theme.agentTalk?.text || theme.secondary;
+      const totalLines = logBuffer.lineCount;
+      const maxScroll = Math.max(0, totalLines - viewportRows);
 
-        visibleLogs.forEach((logLine, idx) => {
-          const rowY = outputStartY + idx;
-          if (logLine.startsWith('> ')) {
-            // User submitted command line
-            writeRow(rowY, 2, '> ', promptCol);
-            writeRow(rowY, 4, logLine.slice(2, W - 5), userTextCol);
-          } else if (logLine.startsWith('Theme set to ')) {
-            // Dim confirmation line
-            writeRow(rowY, 2, logLine.slice(0, W - 3), '#6b7280');
-          } else if (logLine.startsWith('[error') || logLine.includes('error:')) {
-            writeRow(rowY, 2, logLine.slice(0, W - 3), theme.error);
-          } else if (logLine.startsWith('Commands:') || logLine.startsWith('Shortcuts:')) {
-            writeRow(rowY, 2, logLine.slice(0, W - 3), theme.accent);
-          } else if (logLine.startsWith('[neoloop]') || logLine.startsWith('agent:')) {
-            const badge = '[neoloop]';
-            if (logLine.startsWith(badge)) {
-              writeRow(rowY, 2, badge, badgeCol);
-              writeRow(rowY, 2 + badge.length, logLine.slice(badge.length, W - 3), agentTextCol);
-            } else {
-              writeRow(rowY, 2, logLine.slice(0, W - 3), agentTextCol);
+      if (followTail) {
+        scrollTop = maxScroll;
+        linesWhenLeftTail = totalLines;
+      } else {
+        scrollTop = Math.max(0, Math.min(scrollTop, maxScroll));
+        if (scrollTop >= maxScroll) {
+          followTail = true;
+          linesWhenLeftTail = totalLines;
+        }
+      }
+
+      if (totalLines === 0) return;
+
+      const lines = logBuffer.getLines(scrollTop, viewportRows);
+      const userTextCol = theme.userTalk?.text || theme.inputText;
+      const stepCol     = theme.tagline || theme.accent;
+      const errorCol    = theme.error || '#ef4444';
+      const textCol     = theme.text;
+      const dimCol      = theme.textMuted || '#6b7280';
+
+      lines.forEach((line, idx) => {
+        const rowY = outputStartY + idx;
+        if (rowY >= H) return;
+
+        if (line.type === 'command') {
+          writeStyledRow(rowY, 2, '> ', dimCol);
+          const cmdText = line.text.startsWith('> ') ? line.text.slice(2) : line.text;
+          writeStyledRow(rowY, 4, cmdText, userTextCol);
+        } else if (line.type === 'step') {
+          writeStyledRow(rowY, 2, line.text, stepCol);
+        } else if (line.type === 'error') {
+          writeStyledRow(rowY, 2, line.text, errorCol);
+        } else if (line.type === 'info') {
+          writeStyledRow(rowY, 2, line.text, dimCol);
+        } else {
+          if (line.segments && line.segments.length > 0) {
+            let curX = 2;
+            for (const seg of line.segments) {
+              const segStyle = seg.style || textCol;
+              writeStyledRow(rowY, curX, seg.text, segStyle);
+              curX += stringWidth(seg.text);
             }
           } else {
-            // Generic minimal unprefixed log output
-            writeRow(rowY, 2, logLine.slice(0, W - 3), theme.text);
+            writeStyledRow(rowY, 2, line.text, textCol);
           }
-        });
+        }
+      });
+
+      // ── New lines indicator when scrolled up ─────────────────────────────
+      const unreadCount = Math.max(0, totalLines - linesWhenLeftTail);
+      if (!followTail && unreadCount > 0 && scrollTop < maxScroll && viewportRows >= 2) {
+        const botRowY = outputStartY + viewportRows - 1;
+        const msg = ` v ${unreadCount} new line${unreadCount === 1 ? '' : 's'}  (End to jump) `;
+        if (msg.length + 4 <= W) {
+          const pillX = Math.max(2, W - msg.length - 2);
+          const pillBg = theme.surfaceElevated || theme.surface || '#161922';
+          const pillFg = theme.textMuted || '#9ca3af';
+
+          for (let k = 0; k < msg.length && pillX + k < W - 1; k++) {
+            const ch = msg[k]!;
+            const isGlyph = ch === 'v';
+            const col = `BG:${pillBg};FG:${isGlyph ? theme.accent : pillFg}`;
+            setCell(botRowY, pillX + k, ch, col);
+          }
+        }
+      }
+
+      paintScrollbar();
+    }
+
+    // ── Paint scrollbar ──────────────────────────────────────────────────────
+    function paintScrollbar() {
+      const outputStartY = streamH + barHeight + 2;
+      const viewportRows = Math.max(0, H - outputStartY);
+      const totalLines = logBuffer.lineCount;
+
+      // Appears only when lineCount > viewportRows
+      if (viewportRows <= 0 || totalLines <= viewportRows || W < 4) return;
+
+      const maxScroll = totalLines - viewportRows;
+      const thumbSize = Math.max(1, Math.min(viewportRows, Math.round((viewportRows * viewportRows) / totalLines)));
+      const travelRows = viewportRows - thumbSize;
+
+      let thumbY = 0;
+      if (travelRows > 0 && maxScroll > 0) {
+        if (scrollTop >= maxScroll) {
+          thumbY = travelRows;
+        } else if (scrollTop <= 0) {
+          thumbY = 0;
+        } else {
+          thumbY = Math.max(0, Math.min(travelRows, Math.round((scrollTop / maxScroll) * travelRows)));
+        }
+      }
+
+      const isUtf8 = !process.env.LC_ALL?.includes('ASCII') && !process.env.LANG?.includes('ASCII');
+      const trackChar = isUtf8 ? '│' : '|';
+      const thumbChar = isUtf8 ? '┃' : '#';
+
+      // Colors from active theme tokens
+      const trackColor = theme.logoDeep ?? theme.logoShadow ?? theme.surfaceElevated ?? '#2f3d4f';
+      const activeThumbColor = theme.accent || theme.tagline || theme.logo;
+
+      // Idle dimming after ~1.2 seconds without scroll activity
+      const isScrollActive = Date.now() - lastScrollActivityTime < 1200;
+      let idleThumbColor = theme.textMuted || '#6b7280';
+      try {
+        idleThumbColor = lerpColor(activeThumbColor, theme.background || '#0a0a0a', 0.55);
+      } catch {
+        /* fallback to theme.textMuted */
+      }
+      const thumbColor = isScrollActive ? activeThumbColor : idleThumbColor;
+
+      const unreadCount = Math.max(0, totalLines - linesWhenLeftTail);
+      const scrollCol = W - 1;
+      for (let r = 0; r < viewportRows; r++) {
+        const rowY = outputStartY + r;
+        if (rowY >= H) break;
+        const isThumb = r >= thumbY && r < thumbY + thumbSize;
+        const isBottomTrack = !isThumb && r === viewportRows - 1 && !followTail && unreadCount > 0;
+        setCell(
+          rowY,
+          scrollCol,
+          isThumb ? thumbChar : (isBottomTrack ? 'v' : trackChar),
+          isThumb ? thumbColor : (isBottomTrack ? theme.accent : trackColor)
+        );
       }
     }
 
-    // ── Diff & flush frame ───────────────────────────────────────────────────
+    // ── Paint right-click context menu ───────────────────────────────────────
+    function paintContextMenu() {
+      if (mode !== 'contextMenu') return;
+
+      // ── Derive perfectly-themed colors from the live theme ────────────────
+      // Panel background: surfaceElevated gives depth; falls back to surface
+      const panelBg   = theme.surfaceElevated || theme.surface;
+      // Border: inputBorder (neon accent line) or generic border token
+      const borderCol = theme.inputBorder || theme.border;
+      // Selected row highlight: selection swatch (Ctrl+A highlight color)
+      const selBg     = theme.selection;
+      // Label of selected item: background text color (readable on selection)
+      const selFg     = theme.background;
+      // Normal item label: primary text token
+      const itemFg    = theme.text;
+      // Footer hint: muted text token
+      const hintFg    = theme.textMuted !== theme.background ? theme.textMuted : theme.accent;
+
+      // ── Dimensions ───────────────────────────────────────────────────────
+      const MENU_WIDTH  = 16;  // inner content width (chars)
+      const MENU_HEIGHT = CONTEXT_MENU_ITEMS.length + 2; // 1 top border + items + 1 bottom border
+
+      // Clamp so the menu never bleeds off-screen
+      const mx = Math.min(contextMenuX, Math.max(0, W - MENU_WIDTH - 2));
+      const my = Math.min(contextMenuY, Math.max(0, H - MENU_HEIGHT));
+
+      // ── Paint a solid background slab first (clear previous content) ──────
+      for (let row = 0; row < MENU_HEIGHT; row++) {
+        for (let col = 0; col < MENU_WIDTH + 2; col++) {
+          setCell(my + row, mx + col, ' ', `BG:${panelBg};FG:${itemFg}`);
+        }
+      }
+
+      // ── Top border: ┌──────────────┐ ─────────────────────────────────────
+      const topBorder = '┌' + '─'.repeat(MENU_WIDTH) + '┐';
+      for (let k = 0; k < topBorder.length && mx + k < W; k++) {
+        setCell(my, mx + k, topBorder[k]!, `BG:${panelBg};FG:${borderCol}`);
+      }
+
+      // ── Item rows ─────────────────────────────────────────────────────────
+      for (let i = 0; i < CONTEXT_MENU_ITEMS.length; i++) {
+        const item      = CONTEXT_MENU_ITEMS[i]!;
+        const rowY      = my + 1 + i;
+        const isSelected = i === contextMenuSelectedIndex;
+
+        const fg  = isSelected ? selFg  : itemFg;
+        const bg  = isSelected ? selBg  : panelBg;
+        const ptr = isSelected ? '❯' : ' ';
+
+        // Left border
+        setCell(rowY, mx, '│', `BG:${panelBg};FG:${borderCol}`);
+
+        // Pointer glyph
+        setCell(rowY, mx + 1, ptr, `BG:${bg};FG:${isSelected ? borderCol : itemFg};BOLD`);
+
+        // Label (padded to MENU_WIDTH - 2)
+        const label = item.label.padEnd(MENU_WIDTH - 2);
+        for (let k = 0; k < label.length && mx + 2 + k < W; k++) {
+          setCell(rowY, mx + 2 + k, label[k]!, `BG:${bg};FG:${fg}${isSelected ? ';BOLD' : ''}`);
+        }
+
+        // Right border
+        const rCol = mx + MENU_WIDTH + 1;
+        if (rCol < W) {
+          setCell(rowY, rCol, '│', `BG:${panelBg};FG:${borderCol}`);
+        }
+      }
+
+      // ── Bottom border with hint: └────enter/esc──────┘ ───────────────────
+      const hintText = 'enter·esc';
+      const fillLen  = MENU_WIDTH - 2 - hintText.length;
+      const leftFill = Math.max(0, Math.floor(fillLen / 2));
+      const rightFill = Math.max(0, fillLen - leftFill);
+      const bottomBorder = '└' + '─'.repeat(leftFill) + hintText + '─'.repeat(rightFill) + '┘';
+      const botY = my + MENU_HEIGHT - 1;
+      for (let k = 0; k < bottomBorder.length && mx + k < W; k++) {
+        const ch = bottomBorder[k]!;
+        const isHintChar = k > leftFill && k <= leftFill + hintText.length;
+        setCell(botY, mx + k, ch, `BG:${panelBg};FG:${isHintChar ? hintFg : borderCol}`);
+      }
+    }
+
+    // ── Execute a context menu action ────────────────────────────────────────
+    function executeContextMenuAction(action: string) {
+      mode = prevMode;
+      isSelectedAll = false;
+      switch (action) {
+        case 'copy':
+          if (inputBuffer) {
+            copyToClipboard(inputBuffer);
+            logBuffer.log('Copied to clipboard');
+          }
+          break;
+        case 'cut':
+          if (inputBuffer) {
+            copyToClipboard(inputBuffer);
+            inputBuffer = '';
+            cursorIdx   = 0;
+            logBuffer.log('Cut to clipboard');
+          }
+          break;
+        case 'paste':
+          readFromClipboard().then(text => {
+            if (text) {
+              const clean = text.replace(/[\r\n]+/g, ' ').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
+              inputBuffer = inputBuffer.slice(0, cursorIdx) + clean + inputBuffer.slice(cursorIdx);
+              cursorIdx  += clean.length;
+              if (inputBuffer.startsWith('/')) {
+                mode = 'slashMenu';
+                slashMenuSelectedIndex = 0;
+              }
+            }
+          });
+          break;
+        case 'selectAll':
+          if (inputBuffer.length > 0) {
+            isSelectedAll = true;
+            cursorIdx = inputBuffer.length;
+          }
+          break;
+        case 'clear':
+          inputBuffer = '';
+          cursorIdx   = 0;
+          break;
+      }
+    }
+
     function diff(): string {
       let s = '';
       for (let y = 0; y < H; y++) {
@@ -965,7 +1423,20 @@ export function runSplash({
       chars.fill(' ');
       colors.fill('');
 
-      if (stream) {
+      // Minimal fallback for extremely small terminals (< 20 columns or < 8 rows)
+      if (W < 20 || H < 8) {
+        const msg = 'Terminal too small';
+        const my = Math.floor(H / 2);
+        const mx = Math.max(0, Math.floor((W - msg.length) / 2));
+        writeRow(my, mx, msg.slice(0, W), theme.accent);
+        const s = diff();
+        if (s) out.write(s);
+        prevC = chars.slice();
+        prevK = colors.slice();
+        return;
+      }
+
+      if (stream && headerMode === 'full') {
         composeStream(stream, rainPalettes);
         for (let y = 0; y < stream.h; y++) {
           for (let x = 0; x < stream.w; x++) {
@@ -988,6 +1459,8 @@ export function runSplash({
         paintLogs();
       }
 
+      paintContextMenu();
+
       if (Date.now() - lastFull > FULL_REPAINT_MS) {
         prevC.fill(null);
         prevK.fill(null);
@@ -1004,14 +1477,22 @@ export function runSplash({
     function cleanup() {
       if (!running) return;
       running = false;
+      if (scrollRepaintTimer) {
+        clearTimeout(scrollRepaintTimer);
+        scrollRepaintTimer = null;
+      }
+      logBuffer.destroy();
       unsubTheme();
       if (timer) clearTimeout(timer);
       if (cursorTimer) clearInterval(cursorTimer);
       out.off('resize', init);
       inp.off('data', onData);
       process.off('exit', cleanup);
+      process.off('SIGINT', onSigInt);
+      process.off('SIGTERM', onSigTerm);
+      process.off('uncaughtException', onUncaught);
 
-      // Restore terminal: disable bracketed paste, ensure mouse tracking off, show cursor, exit alt screen
+      // Restore terminal: disable bracketed paste, mouse tracking off, show cursor, exit alt screen
       out.write('\x1b[?2004l\x1b[?1000l\x1b[?1002l\x1b[?1006l\x1b[0m\x1b[?25h\x1b[?1049l');
       try {
         inp.setRawMode(false);
@@ -1020,6 +1501,10 @@ export function runSplash({
       }
       inp.pause();
     }
+
+    const onSigInt = () => { cleanup(); process.exit(0); };
+    const onSigTerm = () => { cleanup(); process.exit(0); };
+    const onUncaught = (err: unknown) => { cleanup(); console.error(err); process.exit(1); };
 
     // ── Command execution context ────────────────────────────────────────────
     const commandContext: CommandContext = {
@@ -1031,37 +1516,141 @@ export function runSplash({
         filterQuery = '';
         mode = 'themePicker';
       },
+      toggleMouse: (arg?: string) => {
+        const lower = arg?.trim().toLowerCase();
+        let next = !mouseEnabled;
+        if (lower === 'on') next = true;
+        if (lower === 'off') next = false;
+        setMouseMode(next);
+        saveMouseEnabled(next);
+        logBuffer.log(`Mouse wheel scrolling ${next ? 'enabled' : 'disabled'}`);
+      },
       showHelp: () => {
-        logs.push('Commands:');
-        logs.push('  /theme    Change color theme');
-        logs.push('  /help     Show commands and shortcuts');
-        logs.push('  /clear    Clear the output log');
-        logs.push('  /exit     Quit NeoLoop');
-        logs.push('');
-        logs.push('Shortcuts:');
-        logs.push('  Ctrl+C    Quit NeoLoop');
-        logs.push('  Esc       Clear line / Close menu');
-        logs.push('  Tab       Complete slash command');
-        logs.push('  ↑/↓       Command history / Menu navigation');
+        logBuffer.log('Commands:');
+        logBuffer.log('  /theme    Change color theme');
+        logBuffer.log('  /mouse    Toggle mouse wheel scrolling (on|off)');
+        logBuffer.log('  /help     Show commands and shortcuts');
+        logBuffer.log('  /clear    Clear the output log');
+        logBuffer.log('  /exit     Quit NeoLoop');
+        logBuffer.log('');
+        logBuffer.log('Shortcuts:');
+        logBuffer.log('  Ctrl+C    Quit NeoLoop');
+        logBuffer.log('  Esc       Clear line / Close menu');
+        logBuffer.log('  Tab       Complete slash command');
+        logBuffer.log('  ↑/↓       Command history / Menu navigation');
+        logBuffer.log('  PgUp/PgDn Scroll output up / down');
+        logBuffer.log('  Ctrl+↑/↓  Scroll output 1 line');
+        logBuffer.log('  Ctrl+Home Jump to top of output');
+        logBuffer.log('  Ctrl+End  Jump to bottom of output');
+        logBuffer.log('  Wheel     Scroll output 3 lines/notch');
       },
       clearLogs: () => {
-        logs.length = 0;
+        logBuffer.clear();
+        scrollTop = 0;
+        followTail = true;
+        linesWhenLeftTail = 0;
       },
       exit: () => {
         cleanup();
         process.exit(0);
       },
       log: (msg: string) => {
-        logs.push(msg);
+        logBuffer.log(msg);
+        if (followTail) {
+          lastScrollActivityTime = Date.now();
+        }
       },
     };
 
     // ── Key Event Dispatcher ─────────────────────────────────────────────────
     function handleKeyAction(action: KeyAction) {
-      // Ctrl-C always exits cleanly
+      // Ctrl-C: copy text when input has content; otherwise exit cleanly
       if (action.type === 'ctrl-c') {
+        if (inputBuffer.length > 0 && (mode === 'input' || mode === 'slashMenu')) {
+          copyToClipboard(inputBuffer);
+          isSelectedAll = false;
+          return;
+        }
         cleanup();
         process.exit(0);
+      }
+
+      // Ctrl-A: select all text in input buffer
+      if (action.type === 'ctrl-a') {
+        if (inputBuffer.length > 0 && (mode === 'input' || mode === 'slashMenu')) {
+          isSelectedAll = true;
+          cursorIdx = inputBuffer.length;
+        }
+        return;
+      }
+
+      // Ctrl-V: paste from OS clipboard into input
+      if (action.type === 'ctrl-v') {
+        if (mode === 'input' || mode === 'slashMenu') {
+          readFromClipboard().then(text => {
+            if (text) {
+              const clean = text.replace(/[\r\n]+/g, ' ').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
+              if (isSelectedAll) {
+                inputBuffer = clean;
+                cursorIdx = clean.length;
+                isSelectedAll = false;
+              } else {
+                inputBuffer = inputBuffer.slice(0, cursorIdx) + clean + inputBuffer.slice(cursorIdx);
+                cursorIdx += clean.length;
+              }
+              if (inputBuffer.startsWith('/')) {
+                mode = 'slashMenu';
+                slashMenuSelectedIndex = 0;
+              } else {
+                mode = 'input';
+              }
+            }
+          });
+        }
+        return;
+      }
+
+      // Ctrl-X: cut (copy + clear)
+      if (action.type === 'ctrl-x') {
+        if (inputBuffer.length > 0 && (mode === 'input' || mode === 'slashMenu')) {
+          copyToClipboard(inputBuffer);
+          inputBuffer = '';
+          cursorIdx = 0;
+          isSelectedAll = false;
+          mode = 'input';
+        }
+        return;
+      }
+
+      // ── Ignore clicks and drags (only handle wheel) ────────────────────────
+      if (action.type === 'right-click' || action.type === 'left-click') {
+        return;
+      }
+
+      // ───────────────────────────────────────────────────────────────────────
+      // MODE: Context Menu
+      // ───────────────────────────────────────────────────────────────────────
+      if (mode === 'contextMenu') {
+        if (action.type === 'esc') {
+          mode = prevMode;
+          return;
+        }
+        if (action.type === 'up') {
+          contextMenuSelectedIndex =
+            (contextMenuSelectedIndex - 1 + CONTEXT_MENU_ITEMS.length) % CONTEXT_MENU_ITEMS.length;
+          return;
+        }
+        if (action.type === 'down') {
+          contextMenuSelectedIndex = (contextMenuSelectedIndex + 1) % CONTEXT_MENU_ITEMS.length;
+          return;
+        }
+        if (action.type === 'enter') {
+          executeContextMenuAction(CONTEXT_MENU_ITEMS[contextMenuSelectedIndex]!.action);
+          return;
+        }
+        // Any other key dismisses the menu
+        mode = prevMode;
+        return;
       }
 
       // ───────────────────────────────────────────────────────────────────────
@@ -1102,7 +1691,7 @@ export function runSplash({
             const confirmed = filtered[themePickerSelectedIndex]!;
             setCurrentTheme(confirmed, true);
             pickerInitialTheme = confirmed;
-            logs.push(`Theme set to ${confirmed.name}`);
+            logBuffer.log(`Theme set to ${confirmed.name}`);
           } else {
             setCurrentTheme(pickerInitialTheme, false);
           }
@@ -1191,7 +1780,8 @@ export function runSplash({
             historyIndex = -1;
             savedDraft = '';
             commandHistory.push(chosen.name);
-            logs.push('> ' + chosen.name);
+            logBuffer.append('command', chosen.name);
+            mode = 'input';
             chosen.run(commandContext);
           } else {
             mode = 'input';
@@ -1272,7 +1862,88 @@ export function runSplash({
       // ───────────────────────────────────────────────────────────────────────
       if (!inputVisible) return;
 
+      // ── Viewport scroll keys ────────────────────────────────────────────────
+      const viewportRows = Math.max(0, H - (streamH + barHeight + 2));
+      const maxScroll = Math.max(0, logBuffer.lineCount - viewportRows);
+
+      if (
+        action.type === 'pgup' ||
+        action.type === 'pgdn' ||
+        action.type === 'ctrl-up' ||
+        action.type === 'ctrl-down' ||
+        action.type === 'ctrl-home' ||
+        action.type === 'ctrl-end' ||
+        action.type === 'wheel-up' ||
+        action.type === 'wheel-down'
+      ) {
+        lastScrollActivityTime = Date.now();
+      }
+
+      if (action.type === 'pgup') {
+        accelStep = 1;
+        updateScroll(scrollTop - Math.max(1, viewportRows - 1));
+        requestScrollRepaint();
+        return;
+      }
+
+      if (action.type === 'pgdn') {
+        accelStep = 1;
+        updateScroll(scrollTop + Math.max(1, viewportRows - 1));
+        requestScrollRepaint();
+        return;
+      }
+
+      if (action.type === 'ctrl-up') {
+        const step = getScrollStep(-1);
+        updateScroll(scrollTop - step);
+        requestScrollRepaint();
+        return;
+      }
+
+      if (action.type === 'ctrl-down') {
+        const step = getScrollStep(1);
+        updateScroll(scrollTop + step);
+        requestScrollRepaint();
+        return;
+      }
+
+      if (action.type === 'ctrl-home') {
+        accelStep = 1;
+        updateScroll(0);
+        requestScrollRepaint();
+        return;
+      }
+
+      if (action.type === 'ctrl-end') {
+        accelStep = 1;
+        updateScroll(maxScroll);
+        requestScrollRepaint();
+        return;
+      }
+
+      if (action.type === 'wheel-up') {
+        if (!mouseEnabled) return;
+        const mult = getScrollStep(-1);
+        const step = Math.min(12, 3 + (mult > 1 ? mult : 0));
+        updateScroll(scrollTop - step);
+        requestScrollRepaint();
+        return;
+      }
+
+      if (action.type === 'wheel-down') {
+        if (!mouseEnabled) return;
+        const mult = getScrollStep(1);
+        const step = Math.min(12, 3 + (mult > 1 ? mult : 0));
+        updateScroll(scrollTop + step);
+        requestScrollRepaint();
+        return;
+      }
+
       if (action.type === 'esc') {
+        if (isSelectedAll) {
+          isSelectedAll = false;
+          return;
+        }
         // Esc clears the line
         inputBuffer = '';
         cursorIdx = 0;
@@ -1282,26 +1953,44 @@ export function runSplash({
       }
 
       if (action.type === 'left') {
+        isSelectedAll = false;
         cursorIdx = Math.max(0, cursorIdx - 1);
         return;
       }
 
       if (action.type === 'right') {
+        isSelectedAll = false;
         cursorIdx = Math.min(inputBuffer.length, cursorIdx + 1);
         return;
       }
 
       if (action.type === 'home') {
+        isSelectedAll = false;
         cursorIdx = 0;
         return;
       }
 
       if (action.type === 'end') {
+        if (inputBuffer.length === 0) {
+          lastScrollActivityTime = Date.now();
+          accelStep = 1;
+          scrollTop = maxScroll;
+          followTail = true;
+          requestScrollRepaint();
+          return;
+        }
+        isSelectedAll = false;
         cursorIdx = inputBuffer.length;
         return;
       }
 
       if (action.type === 'delete') {
+        if (isSelectedAll) {
+          inputBuffer = '';
+          cursorIdx = 0;
+          isSelectedAll = false;
+          return;
+        }
         if (cursorIdx < inputBuffer.length) {
           inputBuffer = inputBuffer.slice(0, cursorIdx) + inputBuffer.slice(cursorIdx + 1);
         }
@@ -1309,6 +1998,12 @@ export function runSplash({
       }
 
       if (action.type === 'backspace') {
+        if (isSelectedAll) {
+          inputBuffer = '';
+          cursorIdx = 0;
+          isSelectedAll = false;
+          return;
+        }
         if (cursorIdx > 0) {
           inputBuffer = inputBuffer.slice(0, cursorIdx - 1) + inputBuffer.slice(cursorIdx);
           cursorIdx--;
@@ -1318,6 +2013,7 @@ export function runSplash({
 
       if (action.type === 'up') {
         // Browse command history backwards
+        isSelectedAll = false;
         if (commandHistory.length > 0) {
           if (historyIndex === -1) {
             savedDraft = inputBuffer;
@@ -1335,6 +2031,7 @@ export function runSplash({
 
       if (action.type === 'down') {
         // Browse command history forwards
+        isSelectedAll = false;
         if (historyIndex !== -1) {
           historyIndex++;
           if (historyIndex >= commandHistory.length) {
@@ -1350,9 +2047,15 @@ export function runSplash({
       }
 
       if (action.type === 'paste') {
-        inputBuffer =
-          inputBuffer.slice(0, cursorIdx) + action.text + inputBuffer.slice(cursorIdx);
-        cursorIdx += action.text.length;
+        const pasteText = action.text;
+        if (isSelectedAll) {
+          inputBuffer = pasteText;
+          cursorIdx = pasteText.length;
+          isSelectedAll = false;
+        } else {
+          inputBuffer = inputBuffer.slice(0, cursorIdx) + pasteText + inputBuffer.slice(cursorIdx);
+          cursorIdx += pasteText.length;
+        }
         if (inputBuffer.startsWith('/')) {
           mode = 'slashMenu';
           slashMenuSelectedIndex = 0;
@@ -1361,9 +2064,14 @@ export function runSplash({
       }
 
       if (action.type === 'char') {
-        inputBuffer =
-          inputBuffer.slice(0, cursorIdx) + action.char + inputBuffer.slice(cursorIdx);
-        cursorIdx += action.char.length;
+        if (isSelectedAll) {
+          inputBuffer = action.char;
+          cursorIdx = 1;
+          isSelectedAll = false;
+        } else {
+          inputBuffer = inputBuffer.slice(0, cursorIdx) + action.char + inputBuffer.slice(cursorIdx);
+          cursorIdx += action.char.length;
+        }
         if (inputBuffer.startsWith('/')) {
           mode = 'slashMenu';
           slashMenuSelectedIndex = 0;
@@ -1372,6 +2080,7 @@ export function runSplash({
       }
 
       if (action.type === 'enter') {
+        isSelectedAll = false;
         const trimmed = inputBuffer.trim();
         inputBuffer = '';
         cursorIdx = 0;
@@ -1381,11 +2090,17 @@ export function runSplash({
         if (!trimmed) return;
 
         commandHistory.push(trimmed);
-        logs.push('> ' + trimmed);
+        logBuffer.append('command', trimmed);
 
         // Command routing
         if (trimmed === '/theme') {
           commandContext.openThemePicker();
+          return;
+        }
+
+        if (trimmed === '/mouse' || trimmed.startsWith('/mouse ')) {
+          const arg = trimmed.slice(6).trim();
+          commandContext.toggleMouse?.(arg);
           return;
         }
 
@@ -1398,9 +2113,9 @@ export function runSplash({
           );
           if (target) {
             setCurrentTheme(target, true);
-            logs.push(`Theme set to ${target.name}`);
+            logBuffer.log(`Theme set to ${target.name}`);
           } else {
-            logs.push(`Unknown theme: ${themeNameOrId}`);
+            logBuffer.log(`Unknown theme: ${themeNameOrId}`);
           }
           return;
         }
@@ -1421,7 +2136,7 @@ export function runSplash({
         }
 
         if (trimmed.startsWith('/')) {
-          logs.push(`Unknown command: ${trimmed}. Type /help for available commands.`);
+          logBuffer.log(`Unknown command: ${trimmed}. Type /help for available commands.`);
           return;
         }
 
@@ -1430,16 +2145,19 @@ export function runSplash({
           try {
             Promise.resolve(
               onCommand(trimmed, (msg: string) => {
-                logs.push(msg);
+                logBuffer.log(msg);
+                if (followTail) {
+                  lastScrollActivityTime = Date.now();
+                }
               })
             ).catch(err => {
-              logs.push(`error: ${err?.message || err}`);
+              logBuffer.append('error', `error: ${err?.message || err}`);
             });
           } catch (err: any) {
-            logs.push(`error: ${err?.message || err}`);
+            logBuffer.append('error', `error: ${err?.message || err}`);
           }
         } else {
-          logs.push(`processing: "${trimmed}"`);
+          logBuffer.log(`processing: "${trimmed}"`);
         }
       }
     }
@@ -1454,12 +2172,17 @@ export function runSplash({
     // ── Boot ─────────────────────────────────────────────────────────────────
     disableWinQuickEdit();
 
-    // UTF-8 mode, enter alternate screen buffer, hide cursor, enable bracketed paste,
-    // turn OFF mouse tracking explicitly (never enable \x1b[?1000h)
-    out.write('\x1b%G\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[?1000l\x1b[?1002l\x1b[?1006l');
+    // UTF-8 mode, enter alternate screen buffer, hide cursor, enable bracketed paste.
+    out.write('\x1b%G\x1b[?1049h\x1b[?25l\x1b[?2004h');
+    if (mouseEnabled) {
+      out.write('\x1b[?1000h\x1b[?1006h');
+    }
     init();
     out.on('resize', init);
     process.on('exit', cleanup);
+    process.on('SIGINT', onSigInt);
+    process.on('SIGTERM', onSigTerm);
+    process.on('uncaughtException', onUncaught);
 
     try {
       inp.setRawMode(true);
@@ -1479,12 +2202,16 @@ export function runSplash({
       frame++;
 
       if (frame >= streamStartFrame) {
-        if (!stream) {
-          stream = createStream(W, streamH, rainPalettes.length);
-        }
-        stepStream(stream);
+        if (headerMode === 'full') {
+          if (!stream) {
+            stream = createStream(W, streamH, rainPalettes.length);
+          }
+          stepStream(stream);
 
-        if (stream.hasHitBottom) {
+          if (stream.hasHitBottom) {
+            inputVisible = true;
+          }
+        } else {
           inputVisible = true;
         }
       }

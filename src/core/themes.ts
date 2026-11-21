@@ -52,20 +52,49 @@ export function getThemeDisplayNameColor(theme: ThemeTokens): string {
 }
 
 // ---------------------------------------------------------------------------
-// Theme Persistence (~/.neoloop/config.json)
+// Configuration Persistence (~/.neoloop/config.json)
 // ---------------------------------------------------------------------------
 
-export function loadSavedThemeId(): string {
+export interface NeoLoopConfig {
+  theme?: string;
+  mouse?: boolean;
+}
+
+export function readConfigFile(): NeoLoopConfig {
   try {
     const configDir = path.join(os.homedir(), '.neoloop');
     const configFile = path.join(configDir, 'config.json');
     if (fs.existsSync(configFile)) {
-      const data = JSON.parse(fs.readFileSync(configFile, 'utf8'));
-      if (typeof data.theme === 'string' && data.theme) {
-        const found = findTheme(data.theme);
-        if (found) {
-          return found.id;
-        }
+      return JSON.parse(fs.readFileSync(configFile, 'utf8'));
+    }
+  } catch {
+    // Ignore corrupt or unreadable file
+  }
+  return {};
+}
+
+export function writeConfigFile(updates: Partial<NeoLoopConfig>): void {
+  try {
+    const configDir = path.join(os.homedir(), '.neoloop');
+    const configFile = path.join(configDir, 'config.json');
+    if (!fs.existsSync(configDir)) {
+      fs.mkdirSync(configDir, { recursive: true });
+    }
+    const current = readConfigFile();
+    const merged = { ...current, ...updates };
+    fs.writeFileSync(configFile, JSON.stringify(merged, null, 2), 'utf8');
+  } catch {
+    // Ignore file write errors
+  }
+}
+
+export function loadSavedThemeId(): string {
+  try {
+    const data = readConfigFile();
+    if (typeof data.theme === 'string' && data.theme) {
+      const found = findTheme(data.theme);
+      if (found) {
+        return found.id;
       }
     }
   } catch {
@@ -75,16 +104,23 @@ export function loadSavedThemeId(): string {
 }
 
 export function saveThemeId(themeId: string): void {
+  writeConfigFile({ theme: themeId });
+}
+
+export function loadSavedMouseEnabled(): boolean {
   try {
-    const configDir = path.join(os.homedir(), '.neoloop');
-    const configFile = path.join(configDir, 'config.json');
-    if (!fs.existsSync(configDir)) {
-      fs.mkdirSync(configDir, { recursive: true });
+    const data = readConfigFile();
+    if (typeof data.mouse === 'boolean') {
+      return data.mouse;
     }
-    fs.writeFileSync(configFile, JSON.stringify({ theme: themeId }, null, 2), 'utf8');
   } catch {
-    // Ignore file write errors
+    /* fallback to default */
   }
+  return true; // Default: on
+}
+
+export function saveMouseEnabled(enabled: boolean): void {
+  writeConfigFile({ mouse: enabled });
 }
 
 export {

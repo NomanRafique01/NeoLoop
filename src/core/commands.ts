@@ -10,6 +10,7 @@ export interface CommandContext {
   clearLogs: () => void;
   exit: () => void;
   log: (msg: string) => void;
+  toggleMouse?: (arg?: string) => void;
 }
 
 export interface SlashCommand {
@@ -24,6 +25,15 @@ export const COMMAND_REGISTRY: SlashCommand[] = [
     description: 'Change color theme',
     run: (ctx) => {
       ctx.openThemePicker();
+    },
+  },
+  {
+    name: '/mouse',
+    description: 'Toggle mouse wheel scrolling (on|off)',
+    run: (ctx) => {
+      if (ctx.toggleMouse) {
+        ctx.toggleMouse();
+      }
     },
   },
   {

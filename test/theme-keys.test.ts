@@ -119,10 +119,17 @@ assert.strictEqual(loadSavedThemeId(), DEFAULT_THEME_ID);
 saveThemeId('red-eclipse');
 assert.strictEqual(loadSavedThemeId(), 'red-eclipse');
 
+// Mouse setting persistence
+import { loadSavedMouseEnabled, saveMouseEnabled } from '../src/core/themes.js';
+saveMouseEnabled(false);
+assert.strictEqual(loadSavedMouseEnabled(), false);
+saveMouseEnabled(true);
+assert.strictEqual(loadSavedMouseEnabled(), true);
+
 console.log('Testing Slash Commands Registry...');
-assert.strictEqual(COMMAND_REGISTRY.length, 4);
+assert.strictEqual(COMMAND_REGISTRY.length, 5);
 const cmdNames = COMMAND_REGISTRY.map(c => c.name);
-assert.deepStrictEqual(cmdNames, ['/theme', '/help', '/clear', '/exit']);
+assert.deepStrictEqual(cmdNames, ['/theme', '/mouse', '/help', '/clear', '/exit']);
 
 console.log('Testing Key Sequence Tokenizer...');
 
@@ -144,6 +151,16 @@ assert.deepStrictEqual(parseKeyActions('\x1b[H'), [{ type: 'home' }]);
 assert.deepStrictEqual(parseKeyActions('\x1b[1~'), [{ type: 'home' }]);
 assert.deepStrictEqual(parseKeyActions('\x1b[F'), [{ type: 'end' }]);
 assert.deepStrictEqual(parseKeyActions('\x1b[4~'), [{ type: 'end' }]);
+
+// Scroll & modifier keys (PgUp, PgDn, Ctrl+Up, Ctrl+Down, Ctrl+Home, Ctrl+End, Wheel)
+assert.deepStrictEqual(parseKeyActions('\x1b[5~'), [{ type: 'pgup' }]);
+assert.deepStrictEqual(parseKeyActions('\x1b[6~'), [{ type: 'pgdn' }]);
+assert.deepStrictEqual(parseKeyActions('\x1b[1;5A'), [{ type: 'ctrl-up' }]);
+assert.deepStrictEqual(parseKeyActions('\x1b[1;5B'), [{ type: 'ctrl-down' }]);
+assert.deepStrictEqual(parseKeyActions('\x1b[1;5H'), [{ type: 'ctrl-home' }]);
+assert.deepStrictEqual(parseKeyActions('\x1b[1;5F'), [{ type: 'ctrl-end' }]);
+assert.deepStrictEqual(parseKeyActions('\x1b[<64;10;20M'), [{ type: 'wheel-up' }]);
+assert.deepStrictEqual(parseKeyActions('\x1b[<65;10;20M'), [{ type: 'wheel-down' }]);
 
 // Delete, Backspace, Tab, Enter, Ctrl-C
 assert.deepStrictEqual(parseKeyActions('\x1b[3~'), [{ type: 'delete' }]);
