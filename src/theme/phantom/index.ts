@@ -42,12 +42,25 @@ export const phantom: ThemeTokens = {
   shimmer: '#FFFFFF',
 
   // Live input & cursor
-  inputText: '#EDF2F7',
+  inputBorder: '#A855F7',
+  inputText: '#00FFA3',
   inputPlaceholder: '#4A576D',
   cursor: '#00FFA3',
 
   // Deep royal ultraviolet selection
   selection: '#2D154B',
+
+  // Conversation talk styling
+  userTalk: {
+    prompt: '#00FFA3',
+    text: '#00FFA3',
+    border: '#A855F7',
+  },
+  agentTalk: {
+    badge: '#A855F7',
+    text: '#EDF2F7',
+    dim: '#7989A0',
+  },
 
   // Semantic status tokens
   success: '#00FFA3',

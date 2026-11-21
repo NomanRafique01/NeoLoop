@@ -32,11 +32,24 @@ export const matrix: ThemeTokens = {
   tagline: '#39FF88',
   shimmer: '#FFFFFF',
 
+  inputBorder: '#39FF6A',
   inputText: '#39FF88',
   inputPlaceholder: '#1F9E47',
   cursor: '#D7FFE1',
 
   selection: '#1F9E47',
+
+  // Conversation talk styling
+  userTalk: {
+    prompt: '#39FF6A',
+    text: '#39FF88',
+    border: '#39FF6A',
+  },
+  agentTalk: {
+    badge: '#1F9E47',
+    text: '#D7FFE1',
+    dim: '#6FBF8C',
+  },
 
   success: '#39FF6A',
   warning: '#FFD078',

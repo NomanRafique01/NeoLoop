@@ -42,12 +42,35 @@ function HistoryLine({ text }: { text: string }) {
   const isError = text.includes('[error') || text.includes('error:');
   const isSuccess = text.includes('[theme]') || text.includes('success:');
   const isWarning = text.includes('[warn') || text.includes('warning:');
+  const isAgent = text.startsWith('[neoloop]') || text.startsWith('agent:');
+
+  if (isCommand) {
+    const promptCol = theme.userTalk?.prompt || theme.accent;
+    const textCol = theme.userTalk?.text || theme.inputText;
+    return (
+      <Box paddingLeft={1} flexDirection="row">
+        <Text color={promptCol} bold>{'> '}</Text>
+        <Text color={textCol}>{text.slice(2)}</Text>
+      </Box>
+    );
+  }
+
+  if (isAgent && text.startsWith('[neoloop]')) {
+    const badgeCol = theme.agentTalk?.badge || theme.accentStrong;
+    const textCol = theme.agentTalk?.text || theme.secondary;
+    return (
+      <Box paddingLeft={1} flexDirection="row">
+        <Text color={badgeCol} bold>[neoloop]</Text>
+        <Text color={textCol}>{text.slice('[neoloop]'.length)}</Text>
+      </Box>
+    );
+  }
 
   let color = theme.text;
-  if (isCommand) color = theme.textMuted;
-  else if (isError) color = theme.error;
+  if (isError) color = theme.error;
   else if (isSuccess) color = theme.success;
   else if (isWarning) color = theme.warning;
+  else if (isAgent) color = theme.agentTalk?.text || theme.secondary;
   else color = theme.accent;
 
   return (
@@ -74,17 +97,20 @@ function InputBar({ value, showPlaceholder, cols, isSelectedAll }: InputBarProps
   const ruleWidth = Math.max(1, cols - 2);
   const dashedRule = '-'.repeat(ruleWidth);
   const placeholder = 'Type your message or ask NEOLOOP anything (try /theme)...';
+  const borderCol = theme.inputBorder || theme.border;
+  const promptCol = theme.userTalk?.prompt || theme.accent;
+  const userTextCol = theme.userTalk?.text || theme.inputText;
 
   return (
     <Box flexDirection="column">
       {/* ── top dashed border ── */}
       <Box paddingLeft={1} paddingRight={1}>
-        <Text color={theme.border}>{dashedRule}</Text>
+        <Text color={borderCol}>{dashedRule}</Text>
       </Box>
 
       {/* ── prompt row: > [placeholder OR typed text][cursor] ── */}
       <Box flexDirection="row" paddingLeft={2} paddingRight={1}>
-        <Text color={theme.accent} bold>{'> '}</Text>
+        <Text color={promptCol} bold>{'> '}</Text>
 
         {showPlaceholder ? (
           <>
@@ -98,7 +124,7 @@ function InputBar({ value, showPlaceholder, cols, isSelectedAll }: InputBarProps
                 {value}
               </Text>
             ) : (
-              <Text color={theme.inputText}>{value}</Text>
+              <Text color={userTextCol}>{value}</Text>
             )}
             <BlinkingCursor />
           </>
@@ -107,7 +133,7 @@ function InputBar({ value, showPlaceholder, cols, isSelectedAll }: InputBarProps
 
       {/* ── bottom dashed border ── */}
       <Box paddingLeft={1} paddingRight={1}>
-        <Text color={theme.border}>{dashedRule}</Text>
+        <Text color={borderCol}>{dashedRule}</Text>
       </Box>
     </Box>
   );

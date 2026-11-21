@@ -101,6 +101,44 @@ export function generateMatrixRainPalette(theme: ThemeTokens, levels = 20): Rain
 }
 
 /**
+ * Build one RainPalette per colour in theme.rainColors.
+ * Falls back to a single palette from theme.matrixRain when rainColors is absent.
+ * Each palette has its own gradient shades + a brightened head flash.
+ */
+export function generateMultiRainPalettes(theme: ThemeTokens, levels = 20): RainPalette[] {
+  const colors =
+    theme.rainColors && theme.rainColors.length > 0
+      ? theme.rainColors
+      : [theme.matrixRain];
+
+  const bgRgb = parseHex(theme.background);
+
+  return colors.map(color => {
+    const rainRgb = parseHex(color);
+
+    // Build gradient: bg dark → full colour
+    const shades: string[] = [];
+    for (let i = 0; i <= levels; i++) {
+      const t = i / levels;
+      const factor = 0.08 + 0.92 * Math.pow(t, 1.4);
+      const r = lerp(bgRgb.r * 0.4, rainRgb.r, factor);
+      const g = lerp(bgRgb.g * 0.4, rainRgb.g, factor);
+      const b = lerp(bgRgb.b * 0.4, rainRgb.b, factor);
+      shades.push(rgbToHex(r, g, b));
+    }
+
+    // Head = exact logo colour (no bleaching) — user asked for exact colours
+    const head = color;
+
+    const s17 = shades[Math.min(shades.length - 1, Math.round(levels * 0.85))]!;
+    const s11 = shades[Math.min(shades.length - 1, Math.round(levels * 0.55))]!;
+    const s5  = shades[Math.min(shades.length - 1, Math.round(levels * 0.25))]!;
+
+    return { head, shades, splashColors: [head, s17, s11, s5] };
+  });
+}
+
+/**
  * Compute the color of a character in the tagline during the continuous sweep shimmer.
  */
 export function generateShimmerColor(theme: ThemeTokens, t: number): string {

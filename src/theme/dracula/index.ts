@@ -32,11 +32,24 @@ export const dracula: ThemeTokens = {
   tagline: '#8BE9FD',
   shimmer: '#FFFFFF',
 
-  inputText: '#F8F8F2',
+  inputBorder: '#FF79C6',
+  inputText: '#BD93F9',
   inputPlaceholder: '#6272A4',
   cursor: '#BD93F9',
 
   selection: '#44477A',
+
+  // Conversation talk styling
+  userTalk: {
+    prompt: '#BD93F9',
+    text: '#BD93F9',
+    border: '#FF79C6',
+  },
+  agentTalk: {
+    badge: '#FF79C6',
+    text: '#8BE9FD',
+    dim: '#9B9EB8',
+  },
 
   success: '#50FA7B',
   warning: '#F1FA8C',

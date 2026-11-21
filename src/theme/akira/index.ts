@@ -41,12 +41,25 @@ export const akira: ThemeTokens = {
   shimmer: '#FFFFFF',
 
   // Input & Cursor
-  inputText: '#F5EBE6',
+  inputBorder: '#FF1E44',
+  inputText: '#FFB800',
   inputPlaceholder: '#5C4A63',
   cursor: '#FF1E44',
 
   // Dark wine red selection
   selection: '#420E1E',
+
+  // Conversation talk styling
+  userTalk: {
+    prompt: '#FFB800',
+    text: '#FFB800',
+    border: '#FF1E44',
+  },
+  agentTalk: {
+    badge: '#FF1E44',
+    text: '#00E5FF',
+    dim: '#8C7A91',
+  },
 
   // Semantic feedback
   success: '#00E5FF',

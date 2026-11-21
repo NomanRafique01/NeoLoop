@@ -17,6 +17,7 @@ import {
   setCurrentTheme,
   onThemeChange,
   generateMatrixRainPalette,
+  generateMultiRainPalettes,
   generateShimmerColor,
   parseHex,
   ansiRgb,
@@ -82,6 +83,23 @@ const RESET = '\x1b[0m';
 // ---------------------------------------------------------------------------
 const LOGO_HEIGHT = 6;
 
+/**
+ * Map a logo glyph character to the correct theme colour layer.
+ *
+ * Four-layer depth model (light source: top-right):
+ *   █          → logo        (neon gold front face)
+ *   ╗ ╔ ║ ╦ ╠  → logoGlow    (hot red — bright top/right connectors)
+ *   ═ ╝ ╣ ╩ ╬  → logoShadow  (deep crimson — horizontal bars & bottom-right)
+ *   ╚           → logoDeep   (blood maroon — deepest bottom-left corner)
+ */
+function logoCharColor(c: string, theme: ThemeTokens): string {
+  if (c === '█') return theme.logo;
+  if (c === '╚') return theme.logoDeep ?? theme.logoShadow ?? theme.logoGlow;
+  if (c === '═' || c === '╝' || c === '╣' || c === '╩' || c === '╬')
+    return theme.logoShadow ?? theme.logoGlow;
+  return theme.logoGlow; // ╗ ╔ ║ ╦ ╠ and anything else
+}
+
 const FONT: Record<string, string[]> = {
   N: ['███╗   ██╗', '████╗  ██║', '██╔██╗ ██║', '██║╚██╗██║', '██║ ╚████║', '╚═╝  ╚═══╝'],
   E: ['███████╗', '██╔════╝', '█████╗  ', '██╔══╝  ', '███████╗', '╚══════╝'],
@@ -124,6 +142,7 @@ interface Drop {
   splash: number;
   splashMax: number;
   pause: number;
+  paletteIdx: number; // which colour family this drop uses
 }
 
 interface StreamState {
@@ -135,9 +154,10 @@ interface StreamState {
   colors: string[];
   tick: number;
   hasHitBottom: boolean;
+  numPalettes: number; // total colour families available
 }
 
-function newDrop(h: number, x: number, initialPause = 0): Drop {
+function newDrop(h: number, x: number, numPalettes = 1, initialPause = 0): Drop {
   const floorY = Math.max(0, h - 1);
   const len = Math.max(3, Math.min(floorY, 5 + Math.floor(Math.random() * 4)));
   const laneIndex = Math.floor(x / LANE_SPACING);
@@ -156,10 +176,11 @@ function newDrop(h: number, x: number, initialPause = 0): Drop {
     splash: 0,
     splashMax: 4,
     pause: initialPause,
+    paletteIdx: Math.floor(Math.random() * Math.max(1, numPalettes)),
   };
 }
 
-function createStream(w: number, h: number): StreamState {
+function createStream(w: number, h: number, numPalettes = 1): StreamState {
   const state: StreamState = {
     w,
     h,
@@ -169,6 +190,7 @@ function createStream(w: number, h: number): StreamState {
     colors: new Array(w * h).fill(''),
     tick: 0,
     hasHitBottom: false,
+    numPalettes,
   };
 
   const numLanes = Math.max(1, Math.floor(w / LANE_SPACING));
@@ -180,7 +202,7 @@ function createStream(w: number, h: number): StreamState {
     const laneIndex = lane++;
     const rank = (laneIndex * 13) % numLanes;
     const initialPause = Math.floor((rank / numLanes) * maxIntroTicks);
-    return newDrop(h, x, initialPause);
+    return newDrop(h, x, numPalettes, initialPause);
   });
 
   return state;
@@ -228,6 +250,8 @@ function stepStream(state: StreamState): void {
           d.landed = false;
           d.splash = 0;
           d.pause = d.speedTicks * 3 + Math.floor(Math.random() * 4);
+          // Pick a new random colour on each respawn for variety
+          d.paletteIdx = Math.floor(Math.random() * Math.max(1, state.numPalettes));
         }
       }
     } else if (d.landed && d.splash < d.splashMax) {
@@ -247,17 +271,20 @@ function stepStream(state: StreamState): void {
   }
 }
 
-function composeStream(state: StreamState, palette: RainPalette): void {
+function composeStream(state: StreamState, palettes: RainPalette[]): void {
   const { w, h, drops, grid, chars, colors } = state;
   chars.fill(' ');
   colors.fill('');
 
   const splashChars = ['*', 'o', '~', '.'];
-  const splashColors = palette.splashColors;
 
   for (let x = 0; x < w; x++) {
     const dr = drops[x];
     if (!dr || dr.pause > 0) continue;
+
+    // Pick this drop's colour palette
+    const palette = palettes[dr.paletteIdx % palettes.length]!;
+    const splashColors = palette.splashColors;
 
     const headY = dr.landed ? dr.floorY : dr.y;
     const startY = Math.max(0, dr.tailY + 1);
@@ -316,7 +343,7 @@ function buildLines(
   if (big && big[0]!.length + 6 <= w && avail >= big.length) {
     const logo: Line[] = big.map(row => ({
       text: row,
-      colorAt: i => (row[i] === '█' ? theme.logo : theme.logoGlow),
+      colorAt: i => (row[i] !== ' ' ? logoCharColor(row[i]!, theme) : theme.logoGlow),
     }));
     const use: Line[] = [];
     const hasSpacing = avail >= logo.length + 1 + (fits(tagline) ? 1 : 0) + (fits(hint) ? 2 : 0);
@@ -377,9 +404,8 @@ export function printBanner(title: string, tagline: string): void {
       let line = pad;
       for (let k = 0; k < row.length; k++) {
         const c = row[k]!;
-        if (c === '█') line += ansiRgb(theme.logo) + c + RESET;
-        else if (c !== ' ') line += ansiRgb(theme.logoGlow) + c + RESET;
-        else line += c;
+        if (c === ' ') { line += c; continue; }
+        line += ansiRgb(logoCharColor(c, theme)) + c + RESET;
       }
       out.write(line + '\n');
     }
@@ -414,7 +440,7 @@ export function runSplash({
     const inp = process.stdin;
 
     let theme = getCurrentTheme();
-    let rainPalette = generateMatrixRainPalette(theme);
+    let rainPalettes = generateMultiRainPalettes(theme);
 
     let W = 0;
     let H = 0;
@@ -469,7 +495,7 @@ export function runSplash({
 
     function init() {
       recalcLayout();
-      stream = frame >= streamStartFrame ? createStream(W, streamH) : null;
+      stream = frame >= streamStartFrame ? createStream(W, streamH, rainPalettes.length) : null;
       chars = new Array(W * H).fill(' ');
       colors = new Array(W * H).fill('');
       prevC = new Array(W * H).fill(null);
@@ -481,7 +507,8 @@ export function runSplash({
     // Subscribe to live theme changes (e.g. from /theme command)
     const unsubTheme = onThemeChange((nextTheme) => {
       theme = nextTheme;
-      rainPalette = generateMatrixRainPalette(theme);
+      rainPalettes = generateMultiRainPalettes(theme);
+      if (stream) stream.numPalettes = rainPalettes.length;
       sgrCache.clear();
       prevC.fill(null);
       prevK.fill(null);
@@ -624,7 +651,7 @@ export function runSplash({
             if (c === ' ') continue;
             const idx = (y0 + j) * W + x0_logo + k;
             chars[idx] = c;
-            colors[idx] = c === '█' ? theme.logo : theme.logoGlow;
+            colors[idx] = logoCharColor(c, theme);
           }
         });
       }
@@ -696,13 +723,17 @@ export function runSplash({
         }
       };
 
+      const borderCol = theme.inputBorder || theme.border;
+      const promptCol = theme.userTalk?.prompt || theme.accent;
+      const userTextCol = theme.userTalk?.text || theme.inputText;
+
       // 1) Top dashed border line
       const topY = streamH;
-      writeRow(topY, 1, dashedRule, theme.border);
+      writeRow(topY, 1, dashedRule, borderCol);
 
       // 2) Prompt row:  "> " then placeholder/text then cursor
       const promptY = streamH + 1;
-      writeRow(promptY, 2, '> ', theme.accent);
+      writeRow(promptY, 2, '> ', promptCol);
       const contentX = 4;
 
       if (inputBuffer.length === 0) {
@@ -737,7 +768,7 @@ export function runSplash({
             colors[promptY * W + curX] = cursorOn ? theme.cursor : '';
           }
         } else {
-          writeRow(promptY, contentX, visible, theme.inputText);
+          writeRow(promptY, contentX, visible, userTextCol);
 
           const curX = contentX + (cursorIdx - viewOffset);
           if (curX < W && curX >= contentX) {
@@ -745,14 +776,14 @@ export function runSplash({
               ? visible[cursorIdx - viewOffset]!
               : ' ';
             chars[promptY * W + curX] = (charUnder === ' ' && cursorOn) ? '█' : charUnder;
-            colors[promptY * W + curX] = cursorOn ? theme.cursor : theme.inputText;
+            colors[promptY * W + curX] = cursorOn ? theme.cursor : userTextCol;
           }
         }
       }
 
       // 3) Bottom dashed rule
       const botY = streamH + 2;
-      writeRow(botY, 1, dashedRule, theme.border);
+      writeRow(botY, 1, dashedRule, borderCol);
 
       // 4) Tool logs / execution history scrolling down below the input bar
       const outputStartY = streamH + 3;
@@ -763,16 +794,91 @@ export function runSplash({
         visibleLogs.forEach((logLine, idx) => {
           const rowY = outputStartY + idx;
           const isHistoryCmd = logLine.startsWith('> ');
-          const isError = logLine.includes('[error') || logLine.includes('error:');
-          const isSuccess = logLine.includes('[theme]') || logLine.includes('success:');
-          const isWarning = logLine.includes('[warn') || logLine.includes('warning:');
-          let logColor = theme.inputText;
-          if (isHistoryCmd) logColor = theme.textMuted;
-          else if (isError) logColor = theme.error;
-          else if (isSuccess) logColor = theme.success;
-          else if (isWarning) logColor = theme.warning;
-          else logColor = theme.accent;
-          writeRow(rowY, 2, logLine.slice(0, W - 3), logColor);
+          const isError     = logLine.includes('[error') || logLine.includes('error:');
+          const isSystemTag = logLine.startsWith('[theme]') || logLine.startsWith('[info]') || logLine.includes('success:');
+          const isWarning   = logLine.includes('[warn') || logLine.includes('warning:');
+          const isAgent     = logLine.includes('[neoloop]') || logLine.startsWith('agent:');
+          const isBullet    = /^\s+[•·\-\*]/.test(logLine);
+
+          // Colour aliases from the 4-colour logo family
+          const gold       = theme.accent;                             // #FFE600 — user only
+          const hotRed     = theme.accentStrong;                       // #FF007F — badges & bullets
+          const deepOrange = theme.agentTalk?.text   || '#FF4500';     // #FF4500 — agent body text
+          const crimson    = theme.secondary;                          // #8B1A00 — dim/shadow text
+          const dimRed     = theme.agentTalk?.dim    || '#CC2200';     // #CC2200 — muted detail
+
+          if (isHistoryCmd) {
+            // ── User command  ›  gold prompt + gold text ──────────────────
+            writeRow(rowY, 2, '> ', promptCol);
+            writeRow(rowY, 4, logLine.slice(2, W - 5), userTextCol);
+
+          } else if (isAgent) {
+            // ── [neoloop] badge  ›  red badge + orange body ───────────────
+            if (logLine.startsWith('[neoloop]')) {
+              const badge = '[neoloop]';
+              const rest  = logLine.slice(badge.length);
+              writeRow(rowY, 2, badge, hotRed);
+              writeRow(rowY, 2 + badge.length, rest.slice(0, W - 3 - badge.length), deepOrange);
+            } else {
+              writeRow(rowY, 2, logLine.slice(0, W - 3), deepOrange);
+            }
+
+          } else if (isSystemTag) {
+            // ── [theme] / [info] system output  ›  red badge + crimson body ──
+            const tagMatch = /^(\[[^\]]+\])\s?(.*)$/.exec(logLine);
+            if (tagMatch) {
+              const tag  = tagMatch[1]!;
+              const body = tagMatch[2]!;
+              writeRow(rowY, 2, tag, hotRed);
+              writeRow(rowY, 2 + tag.length + 1, body.slice(0, W - 4 - tag.length), deepOrange);
+            } else {
+              writeRow(rowY, 2, logLine.slice(0, W - 3), deepOrange);
+            }
+
+          } else if (isBullet) {
+            // ── Bullet list items  ›  red bullet + orange name + dim desc ──
+            // Format: "  • name    — Description" or "  • name — Desc * (active)"
+            const bulletMatch = /^(\s+)([•·\-\*])\s+(.*)$/.exec(logLine);
+            if (bulletMatch) {
+              const indent  = bulletMatch[1]!.length;
+              const bullet  = bulletMatch[2]!;
+              const content = bulletMatch[3]!;
+
+              // Write bullet in hot red
+              writeRow(rowY, indent + 2, bullet, hotRed);
+
+              // Split "name    — Description" on em-dash or spaced dash
+              const dashIdx = content.search(/\s+[—–-]\s+/);
+              if (dashIdx > -1) {
+                const name    = content.slice(0, dashIdx);
+                const sep     = content.slice(dashIdx).match(/\s+[—–-]\s+/)![0]!;
+                const desc    = content.slice(dashIdx + sep.length);
+                const isActive = desc.includes('*') || desc.includes('(active)');
+                const nameCol = isActive ? gold : crimson;         // active→gold, rest→crimson
+                const descCol = isActive ? deepOrange : dimRed;    // active→orange, rest→dim
+                writeRow(rowY, indent + 4, name.slice(0, W), nameCol);
+                writeRow(rowY, indent + 4 + name.length, sep, dimRed);
+                writeRow(rowY, indent + 4 + name.length + sep.length, desc.slice(0, W), descCol);
+              } else {
+                // No dash separator — plain bullet content
+                writeRow(rowY, indent + 4, content.slice(0, W - indent - 6), crimson);
+              }
+            } else {
+              writeRow(rowY, 2, logLine.slice(0, W - 3), crimson);
+            }
+
+          } else if (isError) {
+            // ── Error  ›  hot red ─────────────────────────────────────────
+            writeRow(rowY, 2, logLine.slice(0, W - 3), theme.error);
+
+          } else if (isWarning) {
+            // ── Warning  ›  deep crimson ──────────────────────────────────
+            writeRow(rowY, 2, logLine.slice(0, W - 3), theme.warning);
+
+          } else {
+            // ── Generic system output  ›  deep orange (NOT gold) ──────────
+            writeRow(rowY, 2, logLine.slice(0, W - 3), deepOrange);
+          }
         });
       }
     }
@@ -951,7 +1057,7 @@ export function runSplash({
       colors.fill('');
 
       if (stream) {
-        composeStream(stream, rainPalette);
+        composeStream(stream, rainPalettes);
         for (let y = 0; y < stream.h; y++) {
           for (let x = 0; x < stream.w; x++) {
             const source = y * stream.w + x;
@@ -1323,7 +1429,7 @@ export function runSplash({
 
       if (frame >= streamStartFrame) {
         if (!stream) {
-          stream = createStream(W, streamH);
+          stream = createStream(W, streamH, rainPalettes.length);
         }
         stepStream(stream);
 

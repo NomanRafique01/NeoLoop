@@ -27,8 +27,8 @@ export const themes: Record<string, ThemeTokens> = {
   dracula,
 };
 
-export const DEFAULT_THEME_ID = 'phantom';
-export const defaultTheme: ThemeTokens = phantom;
+export const DEFAULT_THEME_ID = 'cyberpunk';
+export const defaultTheme: ThemeTokens = cyberpunk;
 
 /**
  * Find a theme by id or case-insensitive name.
