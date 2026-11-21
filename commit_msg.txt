@@ -1,6 +1,0 @@
-chore: clean up project structure
-
-- Remove empty src/utils/ directory
-- Remove trivial barrel files src/core/index.ts and src/ui/index.ts;
-  update neoloop.tsx imports to point directly to source files
-- Remove neoloop-ps.bat; replace with npm run start:ps script in package.json
