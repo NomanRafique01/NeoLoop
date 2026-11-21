@@ -6,25 +6,22 @@
  */
 
 import { ThemeTokens } from './types.js';
-import { phantom } from './phantom/index.js';
-import { akira } from './akira/index.js';
-import { matrix } from './matrix/index.js';
 import { cyberpunk } from './cyberpunk/index.js';
-import { dracula } from './dracula/index.js';
+import { duskCircuit } from './dusk-circuit/index.js';
+import { neonTokyo } from './neon-tokyo/index.js';
+import { arcticGold } from './arctic-gold/index.js';
 
 // Export individual theme modules
-export * from './phantom/index.js';
-export * from './akira/index.js';
-export * from './matrix/index.js';
 export * from './cyberpunk/index.js';
-export * from './dracula/index.js';
+export * from './dusk-circuit/index.js';
+export * from './neon-tokyo/index.js';
+export * from './arctic-gold/index.js';
 
 export const themes: Record<string, ThemeTokens> = {
-  phantom,
-  akira,
-  matrix,
   cyberpunk,
-  dracula,
+  'dusk-circuit': duskCircuit,
+  'neon-tokyo':   neonTokyo,
+  'arctic-gold':  arcticGold,
 };
 
 export const DEFAULT_THEME_ID = 'cyberpunk';
