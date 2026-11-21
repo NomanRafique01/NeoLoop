@@ -8,6 +8,7 @@
 
 import { ThemeTokens, ThemeListener } from './types.js';
 import { defaultTheme, findTheme } from './themes.js';
+import { loadSavedThemeId, saveThemeId } from '../core/themes.js';
 
 // ---------------------------------------------------------------------------
 // Color Math Helpers
@@ -180,7 +181,7 @@ export function ansiBgRgb(hexStr: string): string {
 // Active Theme State & Subscription Manager
 // ---------------------------------------------------------------------------
 
-let activeTheme: ThemeTokens = defaultTheme;
+let activeTheme: ThemeTokens = findTheme(loadSavedThemeId()) || defaultTheme;
 const listeners = new Set<ThemeListener>();
 
 /**
@@ -194,12 +195,15 @@ export function getCurrentTheme(): ThemeTokens {
  * Set the active theme by token object or name/id.
  * Immediately notifies all subscribers.
  */
-export function setCurrentTheme(themeOrId: ThemeTokens | string): ThemeTokens {
+export function setCurrentTheme(themeOrId: ThemeTokens | string, save = true): ThemeTokens {
   const resolved = typeof themeOrId === 'string' ? findTheme(themeOrId) : themeOrId;
   if (!resolved) {
     throw new Error(`Theme not found: "${themeOrId}"`);
   }
   activeTheme = resolved;
+  if (save) {
+    saveThemeId(resolved.id);
+  }
   for (const listener of listeners) {
     try {
       listener(activeTheme);

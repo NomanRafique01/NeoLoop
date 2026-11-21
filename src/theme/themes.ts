@@ -14,6 +14,8 @@ import { auroraMint } from './aurora-mint/index.js';
 import { royalSunset } from './royal-sunset/index.js';
 import { ghostProtocol } from './ghost-protocol/index.js';
 import { roseSignature } from './rose-signature/index.js';
+import { deepSpace } from './deep-space/index.js';
+import { redEclipse } from './red-eclipse/index.js';
 
 // Export individual theme modules
 export * from './cyberpunk/index.js';
@@ -24,6 +26,8 @@ export * from './aurora-mint/index.js';
 export * from './royal-sunset/index.js';
 export * from './ghost-protocol/index.js';
 export * from './rose-signature/index.js';
+export * from './deep-space/index.js';
+export * from './red-eclipse/index.js';
 
 export const themes: Record<string, ThemeTokens> = {
   cyberpunk,
@@ -34,6 +38,8 @@ export const themes: Record<string, ThemeTokens> = {
   'royal-sunset':   royalSunset,
   'ghost-protocol': ghostProtocol,
   'rose-signature': roseSignature,
+  'deep-space':     deepSpace,
+  'red-eclipse':    redEclipse,
 };
 
 export const DEFAULT_THEME_ID = 'cyberpunk';

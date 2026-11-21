@@ -3,26 +3,34 @@
  *
  * Renders the NeoLoop ASCII block typography, cyberpunk matrix background
  * simulation, and continuous neon shimmer light sweep using raw ANSI
- * differential updates on the terminal alternate screen buffer.
+ * differential updates on the terminal alternate screen buffer at 20 FPS.
  *
- * Driven by the centralized theme token engine (Phantom, Matrix, etc.)
- * with live real-time theme morphing via slash commands.
+ * Driven by the centralized theme token engine (Cyberpunk, Dusk Circuit, etc.)
+ * with live real-time theme morphing via slash commands and interactive picker.
  */
+
 import { spawnSync } from 'child_process';
-import { copyToClipboard, readFromClipboard } from './clipboard.js';
 import {
   ThemeTokens,
   RainPalette,
   getCurrentTheme,
   setCurrentTheme,
   onThemeChange,
-  generateMatrixRainPalette,
   generateMultiRainPalettes,
   generateShimmerColor,
   parseHex,
   ansiRgb,
-  processSlashCommand,
 } from '../theme/index.js';
+import {
+  THEMES,
+  getTheme,
+  DEFAULT_THEME_ID,
+  loadSavedThemeId,
+  saveThemeId,
+  getThemeDisplayNameColor,
+} from './themes.js';
+import { COMMAND_REGISTRY, SlashCommand, CommandContext } from './commands.js';
+import { parseKeyActions, KeyAction } from './keys.js';
 
 // ---------------------------------------------------------------------------
 // Windows QuickEdit guard & Console Mode
@@ -87,10 +95,10 @@ const LOGO_HEIGHT = 6;
  * Map a logo glyph character to the correct theme colour layer.
  *
  * Four-layer depth model (light source: top-right):
- *   █          → logo        (neon gold front face)
- *   ╗ ╔ ║ ╦ ╠  → logoGlow    (hot red — bright top/right connectors)
- *   ═ ╝ ╣ ╩ ╬  → logoShadow  (deep crimson — horizontal bars & bottom-right)
- *   ╚           → logoDeep   (blood maroon — deepest bottom-left corner)
+ *   █          → logo        (e.g. Neon Gold front face)
+ *   ╗ ╔ ║ ╦ ╠  → logoGlow    (e.g. Hot Red — bright top/right connectors)
+ *   ═ ╝ ╣ ╩ ╬  → logoShadow  (e.g. Electric Blue — horizontal bars & bottom-right)
+ *   ╚           → logoDeep   (e.g. Electric Blue / Deep corner trace)
  */
 function logoCharColor(c: string, theme: ThemeTokens): string {
   if (c === '█') return theme.logo;
@@ -364,29 +372,33 @@ function buildLines(
 }
 
 const sgrCache = new Map<string, string>();
-function sgr(hexCode: string, theme: ThemeTokens): string {
-  let s = sgrCache.get(hexCode);
-  if (!s) {
-    if (hexCode.startsWith('SEL:')) {
-      const bg = parseHex(theme.selection);
-      const fg = parseHex(theme.text);
-      s = `\x1b[0;1;38;2;${fg.r};${fg.g};${fg.b};48;2;${bg.r};${bg.g};${bg.b}m`;
+function sgr(key: string): string {
+  let cached = sgrCache.get(key);
+  if (!cached) {
+    if (key.startsWith('BG:')) {
+      // Format: BG:<bgHex>;FG:<fgHex>[;BOLD]
+      const parts = key.split(';');
+      const bgHex = parts[0]!.slice(3);
+      const fgHex = parts[1]!.slice(3);
+      const isBold = parts.includes('BOLD');
+      const bg = parseHex(bgHex);
+      const fg = parseHex(fgHex);
+      cached = `\x1b[0;${isBold ? '1;' : ''}38;2;${fg.r};${fg.g};${fg.b};48;2;${bg.r};${bg.g};${bg.b}m`;
+    } else if (key.startsWith('BOLD:')) {
+      const fgHex = key.slice(5);
+      const fg = parseHex(fgHex);
+      cached = `\x1b[0;1;38;2;${fg.r};${fg.g};${fg.b}m`;
     } else {
-      const { r, g, b } = parseHex(hexCode);
-      const isGlow =
-        hexCode.toLowerCase() === theme.accent.toLowerCase() ||
-        hexCode.toLowerCase() === theme.cursor.toLowerCase() ||
-        hexCode.toLowerCase() === theme.shimmer.toLowerCase();
-      const boldCode = isGlow ? '1;' : '';
-      s = `\x1b[0;${boldCode}38;2;${r};${g};${b}m`;
+      const { r, g, b } = parseHex(key);
+      cached = `\x1b[0;38;2;${r};${g};${b}m`;
     }
-    sgrCache.set(hexCode, s);
+    sgrCache.set(key, cached);
   }
-  return s;
+  return cached;
 }
 
 // ---------------------------------------------------------------------------
-// Static Banner — printed on the main buffer after splash exits
+// Static Banner — printed if splash screen exits cleanly
 // ---------------------------------------------------------------------------
 export function printBanner(title: string, tagline: string): void {
   const out = process.stdout;
@@ -394,7 +406,6 @@ export function printBanner(title: string, tagline: string): void {
   const theme = getCurrentTheme();
 
   const big = bigLogo(title);
-
   if (big && big[0]!.length + 6 <= W) {
     const x0 = Math.max(0, Math.floor((W - big[0]!.length) / 2));
     const pad = ' '.repeat(x0);
@@ -404,17 +415,18 @@ export function printBanner(title: string, tagline: string): void {
       let line = pad;
       for (let k = 0; k < row.length; k++) {
         const c = row[k]!;
-        if (c === ' ') { line += c; continue; }
+        if (c === ' ') {
+          line += c;
+          continue;
+        }
         line += ansiRgb(logoCharColor(c, theme)) + c + RESET;
       }
       out.write(line + '\n');
     }
 
-    // tagline centered, bold accent
     const x0_tag = Math.max(0, Math.floor((W - tagline.length) / 2));
     out.write('\n' + ' '.repeat(x0_tag) + ansiRgb(theme.tagline, true) + tagline + RESET + '\n\n');
   } else {
-    // narrow terminal fallback
     out.write('\n' + ansiRgb(theme.logo, true) + title.toUpperCase() + RESET + '\n');
     out.write(ansiRgb(theme.tagline, true) + tagline + RESET + '\n\n');
   }
@@ -433,7 +445,10 @@ export function runSplash({
 }: SplashOptions): Promise<string> {
   return new Promise(resolve => {
     if (initialThemeOverride) {
-      setCurrentTheme(initialThemeOverride);
+      const resolved = typeof initialThemeOverride === 'string'
+        ? getTheme(initialThemeOverride)
+        : initialThemeOverride;
+      setCurrentTheme(resolved, false);
     }
 
     const out = process.stdout;
@@ -455,21 +470,32 @@ export function runSplash({
     let running = true;
     let timer: NodeJS.Timeout | undefined;
 
-    // ── input-bar & tool log state ─────────────────────────────────────────
+    // ── Input bar & dispatcher state ─────────────────────────────────────────
+    type Mode = 'input' | 'slashMenu' | 'themePicker';
+    let mode: Mode = 'input';
+
     let inputVisible = false;
     let inputBuffer = '';
     let cursorIdx = 0;
-    let isSelectedAll = false;
     let cursorOn = true;
     let cursorTimer: NodeJS.Timeout | undefined;
+
+    // Command history
+    const commandHistory: string[] = [];
+    let historyIndex = -1;
+    let savedDraft = '';
+
+    // Logs buffer
     const logs: string[] = [...initialLogs];
 
-    // ── Clipboard & Custom Copy Window State ──────────────────────────────
-    let copyWindowOpen = false;
-    let copyWindowX = 0;
-    let copyWindowY = 0;
-    let selectedOptionIdx = 1;
-    let lastCtrlCTime = 0;
+    // Slash menu state
+    let slashMenuSelectedIndex = 0;
+
+    // Theme picker state
+    let pickerInitialTheme: ThemeTokens = theme;
+    let themePickerSelectedIndex = 0;
+    let themePickerScrollOffset = 0;
+    let filterQuery = '';
 
     const LETTER_FRAMES = 3;
     const titleDoneFrame = title.length * LETTER_FRAMES;
@@ -479,7 +505,7 @@ export function runSplash({
     const hintStartFrame = hint ? tagDoneFrame + 3 : tagDoneFrame;
     const streamStartFrame = hint ? hintStartFrame + 3 : tagDoneFrame + 3;
 
-    // ── layout helpers ─────────────────────────────────────────────────────
+    // ── Layout helpers ───────────────────────────────────────────────────────
     function recalcLayout() {
       W = Math.max(20, (out.columns || 80) - 1);
       H = Math.max(8, out.rows || 24);
@@ -504,7 +530,7 @@ export function runSplash({
       out.write('\x1b[0m\x1b[2J\x1b[H');
     }
 
-    // Subscribe to live theme changes (e.g. from /theme command)
+    // Subscribe to live theme changes (e.g. from picker navigation)
     const unsubTheme = onThemeChange((nextTheme) => {
       theme = nextTheme;
       rainPalettes = generateMultiRainPalettes(theme);
@@ -515,114 +541,22 @@ export function runSplash({
       lastFull = Date.now();
     });
 
-    function showToast(_msg: string) {
-      // Disabled toast banner
+    function setCell(y: number, x: number, ch: string, col: string) {
+      if (y >= 0 && y < H && x >= 0 && x < W) {
+        const idx = y * W + x;
+        chars[idx] = ch;
+        colors[idx] = col;
+      }
     }
 
-    interface MenuAction {
-      id: string;
-      title: string;
-      badge: string;
-      action: () => void | Promise<void>;
+    function writeRow(y: number, startX: number, text: string, col: string) {
+      if (y < 0 || y >= H) return;
+      for (let k = 0; k < text.length && startX + k < W; k++) {
+        setCell(y, startX + k, text[k]!, col);
+      }
     }
 
-    function getMenuActions(): MenuAction[] {
-      return [
-        {
-          id: 'copy',
-          title: 'Copy',
-          badge: 'Ctrl+C',
-          action: () => {
-            if (inputBuffer) {
-              copyToClipboard(inputBuffer);
-              showToast(`Copied input (${inputBuffer.length} chars)`);
-            } else if (logs.length > 0) {
-              const lastLog = logs[logs.length - 1]!;
-              copyToClipboard(lastLog);
-              showToast('Copied latest log line');
-            } else {
-              showToast('Input bar is empty');
-            }
-            copyWindowOpen = false;
-          },
-        },
-        {
-          id: 'paste',
-          title: 'Paste',
-          badge: 'Ctrl+V',
-          action: async () => {
-            copyWindowOpen = false;
-            try {
-              const pasted = await readFromClipboard();
-              if (pasted) {
-                const clean = pasted.replace(/[\r\n]+/g, ' ');
-                if (isSelectedAll) {
-                  inputBuffer = clean;
-                  cursorIdx = clean.length;
-                  isSelectedAll = false;
-                } else {
-                  inputBuffer = inputBuffer.slice(0, cursorIdx) + clean + inputBuffer.slice(cursorIdx);
-                  cursorIdx += clean.length;
-                }
-                showToast(`Pasted ${clean.length} chars`);
-              } else {
-                showToast('Clipboard is empty');
-              }
-            } catch {
-              showToast('Could not read clipboard');
-            }
-          },
-        },
-        {
-          id: 'selectAll',
-          title: 'Select All',
-          badge: 'Ctrl+A',
-          action: () => {
-            if (inputBuffer.length > 0) {
-              isSelectedAll = true;
-              cursorIdx = inputBuffer.length;
-              showToast(`Selected all (${inputBuffer.length} chars)`);
-            } else {
-              showToast('Input bar is empty');
-            }
-            copyWindowOpen = false;
-          },
-        },
-        {
-          id: 'cut',
-          title: 'Cut',
-          badge: 'Ctrl+X',
-          action: () => {
-            if (inputBuffer) {
-              copyToClipboard(inputBuffer);
-              showToast(`Cut ${inputBuffer.length} chars`);
-              inputBuffer = '';
-              cursorIdx = 0;
-              isSelectedAll = false;
-            } else {
-              showToast('Input bar is empty');
-            }
-            copyWindowOpen = false;
-          },
-        },
-        {
-          id: 'logs',
-          title: 'Copy Terminal Logs',
-          badge: 'Logs',
-          action: () => {
-            if (logs.length > 0) {
-              copyToClipboard(logs.join('\n'));
-              showToast(`Copied ${logs.length} log lines`);
-            } else {
-              showToast('No terminal logs yet');
-            }
-            copyWindowOpen = false;
-          },
-        },
-      ];
-    }
-
-    // ── paint the logo + tagline into chars/colors ─────────────────────────
+    // ── Paint the logo + tagline into chars/colors ───────────────────────────
     function paintContent() {
       const fullLines = buildLines(title, tagline, hint, theme.accent, W, H, theme);
       const y0 = Math.max(0, Math.floor(H / 4 - fullLines.length / 2));
@@ -708,321 +642,286 @@ export function runSplash({
       }
     }
 
-    // ── paint dashed border input bar & tool logs (under rain) ────────────
+    // ── Paint dashed border input bar ────────────────────────────────────────
     function paintInputBar() {
       if (!inputVisible) return;
 
       const ruleWidth = Math.max(1, W - 2);
       const dashedRule = '-'.repeat(ruleWidth);
 
-      const writeRow = (y: number, startX: number, text: string, color: string) => {
-        if (y < 0 || y >= H) return;
-        for (let k = 0; k < text.length && startX + k < W; k++) {
-          chars[y * W + startX + k] = text[k]!;
-          colors[y * W + startX + k] = color;
-        }
-      };
-
       const borderCol = theme.inputBorder || theme.border;
       const promptCol = theme.userTalk?.prompt || theme.accent;
       const userTextCol = theme.userTalk?.text || theme.inputText;
+      const cursorCol = theme.cursor;
+      const placeholderCol = theme.inputPlaceholder;
 
       // 1) Top dashed border line
       const topY = streamH;
       writeRow(topY, 1, dashedRule, borderCol);
 
-      // 2) Prompt row:  "> " then placeholder/text then cursor
+      // 2) Prompt row: "> " then typed text or placeholder, with cursor
       const promptY = streamH + 1;
       writeRow(promptY, 2, '> ', promptCol);
-      const contentX = 4;
+
+      const cursorCellX = 4;
+      const textStartX = 4;
+      const placeholderStartX = 6;
 
       if (inputBuffer.length === 0) {
-        const maxPhLen = Math.max(0, W - contentX - 2);
-        const ph = BAR_PLACEHOLDER.slice(0, maxPhLen);
-        writeRow(promptY, contentX, ph, theme.inputPlaceholder);
-        const curX = contentX;
-        if (curX < W) {
-          chars[promptY * W + curX] = cursorOn ? '█' : (ph[0] || ' ');
-          colors[promptY * W + curX] = cursorOn ? theme.cursor : theme.inputPlaceholder;
+        // Blinking cursor sits at cell 4 BEFORE placeholder
+        if (cursorOn) {
+          setCell(promptY, cursorCellX, '█', cursorCol);
+        } else {
+          setCell(promptY, cursorCellX, ' ', '');
         }
+
+        // Placeholder starts at cell 6 so every character is fully visible
+        const maxPhLen = Math.max(0, W - placeholderStartX - 2);
+        const ph = BAR_PLACEHOLDER.slice(0, maxPhLen);
+        writeRow(promptY, placeholderStartX, ph, placeholderCol);
       } else {
-        const maxVisible = Math.max(1, W - contentX - 2);
+        const maxVisible = Math.max(1, W - textStartX - 2);
         let viewOffset = 0;
         if (cursorIdx >= maxVisible) {
           viewOffset = cursorIdx - maxVisible + 1;
         }
         const visible = inputBuffer.slice(viewOffset, viewOffset + maxVisible);
 
-        if (isSelectedAll) {
-          for (let k = 0; k < visible.length; k++) {
-            const posX = contentX + k;
-            if (posX < W) {
-              const idx = promptY * W + posX;
-              chars[idx] = visible[k]!;
-              colors[idx] = `SEL:${theme.selection}`;
-            }
-          }
-          const curX = contentX + (cursorIdx - viewOffset);
-          if (curX < W && curX >= contentX && curX === contentX + visible.length) {
-            chars[promptY * W + curX] = cursorOn ? '█' : ' ';
-            colors[promptY * W + curX] = cursorOn ? theme.cursor : '';
-          }
-        } else {
-          writeRow(promptY, contentX, visible, userTextCol);
+        // Draw typed text
+        writeRow(promptY, textStartX, visible, userTextCol);
 
-          const curX = contentX + (cursorIdx - viewOffset);
-          if (curX < W && curX >= contentX) {
-            const charUnder = (cursorIdx - viewOffset < visible.length)
-              ? visible[cursorIdx - viewOffset]!
-              : ' ';
-            chars[promptY * W + curX] = (charUnder === ' ' && cursorOn) ? '█' : charUnder;
-            colors[promptY * W + curX] = cursorOn ? theme.cursor : userTextCol;
+        // Draw cursor at active position
+        const curX = textStartX + (cursorIdx - viewOffset);
+        if (curX < W && curX >= textStartX) {
+          if (cursorIdx - viewOffset < visible.length) {
+            // Cursor is over a character: inverted block highlight
+            const ch = visible[cursorIdx - viewOffset]!;
+            if (cursorOn) {
+              setCell(promptY, curX, ch, `BG:${cursorCol};FG:#0a0a0a;BOLD`);
+            } else {
+              setCell(promptY, curX, ch, userTextCol);
+            }
+          } else {
+            // Cursor is at end of line
+            if (cursorOn) {
+              setCell(promptY, curX, '█', cursorCol);
+            } else {
+              setCell(promptY, curX, ' ', '');
+            }
           }
         }
       }
 
-      // 3) Bottom dashed rule
+      // 3) Bottom dashed border line
       const botY = streamH + 2;
       writeRow(botY, 1, dashedRule, borderCol);
+    }
 
-      // 4) Tool logs / execution history scrolling down below the input bar
+    // ── Paint theme picker panel ─────────────────────────────────────────────
+    function getFilteredThemes(): ThemeTokens[] {
+      if (!filterQuery) return THEMES;
+      const q = filterQuery.toLowerCase();
+      return THEMES.filter(t => t.name.toLowerCase().includes(q) || t.id.toLowerCase().includes(q));
+    }
+
+    function paintThemePicker() {
+      const pickerStartY = streamH + 3;
+      const availRows = Math.max(0, H - pickerStartY);
+      if (availRows <= 2) return;
+
+      const dimColor = '#6b7280';
+      const bgTint = '#1e222a';
+
+      const filtered = getFilteredThemes();
+
+      // 1. Header line: title + hints
+      const titleLeft = filterQuery ? `Select theme (search: "${filterQuery}")` : 'Select theme';
+      const hintsRight = '↑↓ move · enter apply · esc cancel';
+      const headerY = pickerStartY;
+
+      writeRow(headerY, 2, titleLeft, dimColor);
+      const hintX = Math.max(2 + titleLeft.length + 2, W - hintsRight.length - 2);
+      writeRow(headerY, hintX, hintsRight, dimColor);
+
+      // 2. Separator line
+      const sepY = pickerStartY + 1;
+      const sepWidth = Math.max(1, W - 4);
+      writeRow(sepY, 2, '─'.repeat(sepWidth), dimColor);
+
+      // 3. Theme list
+      const listStartY = pickerStartY + 2;
+      const listHeight = Math.max(1, availRows - 2);
+
+      if (filtered.length === 0) {
+        writeRow(listStartY, 2, 'No matching themes', dimColor);
+        return;
+      }
+
+      // Adjust scroll offset
+      if (themePickerSelectedIndex < themePickerScrollOffset) {
+        themePickerScrollOffset = themePickerSelectedIndex;
+      } else if (themePickerSelectedIndex >= themePickerScrollOffset + listHeight) {
+        themePickerScrollOffset = themePickerSelectedIndex - listHeight + 1;
+      }
+
+      const visibleCount = Math.min(filtered.length - themePickerScrollOffset, listHeight);
+
+      for (let i = 0; i < visibleCount; i++) {
+        const themeIdx = themePickerScrollOffset + i;
+        const t = filtered[themeIdx]!;
+        const isSelected = themeIdx === themePickerSelectedIndex;
+        const isCurrent = t.id === pickerInitialTheme.id;
+        const rowY = listStartY + i;
+
+        const rowBg = isSelected ? bgTint : '';
+        const nameColor = getThemeDisplayNameColor(t);
+        const rowWidth = Math.min(W - 4, 46);
+
+        if (isSelected) {
+          for (let x = 2; x < 2 + rowWidth; x++) {
+            setCell(rowY, x, ' ', `BG:${rowBg};FG:${dimColor}`);
+          }
+        }
+
+        // Selection pointer: ❯
+        const pointer = isSelected ? '❯' : ' ';
+        const pointerKey = isSelected ? `BG:${rowBg};FG:${dimColor};BOLD` : dimColor;
+        setCell(rowY, 2, pointer, pointerKey);
+
+        // Theme name (padded to 16 characters)
+        const displayName = t.name.padEnd(16);
+        const nameKey = isSelected ? `BG:${rowBg};FG:${nameColor};BOLD` : nameColor;
+        for (let k = 0; k < displayName.length && 4 + k < W; k++) {
+          setCell(rowY, 4 + k, displayName[k]!, nameKey);
+        }
+
+        // Four color swatches: ■ ■ ■ ■
+        const swatchStartX = 21;
+        const swatches = [
+          t.logo,
+          t.logoGlow,
+          t.logoShadow ?? t.textMuted,
+          t.tagline,
+        ];
+        for (let s = 0; s < 4; s++) {
+          const sx = swatchStartX + s * 2;
+          const sColor = isSelected ? `BG:${rowBg};FG:${swatches[s]!}` : swatches[s]!;
+          setCell(rowY, sx, '■', sColor);
+          if (s < 3) {
+            setCell(rowY, sx + 1, ' ', isSelected ? `BG:${rowBg};FG:${dimColor}` : '');
+          }
+        }
+
+        // 'current' label if this was the active theme
+        if (isCurrent) {
+          const currentLabel = 'current';
+          const curX = swatchStartX + 10;
+          const curKey = isSelected ? `BG:${rowBg};FG:${dimColor}` : dimColor;
+          for (let c = 0; c < currentLabel.length && curX + c < W; c++) {
+            setCell(rowY, curX + c, currentLabel[c]!, curKey);
+          }
+        }
+      }
+    }
+
+    // ── Paint slash-command menu ─────────────────────────────────────────────
+    function getMatchingCommands(): SlashCommand[] {
+      const q = inputBuffer.trim().toLowerCase();
+      return COMMAND_REGISTRY.filter(cmd => cmd.name.startsWith(q));
+    }
+
+    function paintSlashMenu() {
+      const menuStartY = streamH + 3;
+      const availRows = Math.max(0, H - menuStartY);
+      if (availRows <= 1) return;
+
+      const dimColor = '#6b7280';
+      const bgTint = '#1e222a';
+
+      const matching = getMatchingCommands();
+      if (matching.length === 0) {
+        writeRow(menuStartY, 2, 'No matching commands', dimColor);
+        return;
+      }
+
+      const visibleCount = Math.min(matching.length, availRows);
+
+      for (let i = 0; i < visibleCount; i++) {
+        const cmd = matching[i]!;
+        const isSelected = i === slashMenuSelectedIndex;
+        const rowY = menuStartY + i;
+
+        const rowBg = isSelected ? bgTint : '';
+        const rowWidth = Math.min(W - 4, 46);
+
+        if (isSelected) {
+          for (let x = 2; x < 2 + rowWidth; x++) {
+            setCell(rowY, x, ' ', `BG:${rowBg};FG:${dimColor}`);
+          }
+        }
+
+        const pointer = isSelected ? '❯' : ' ';
+        const pointerKey = isSelected ? `BG:${rowBg};FG:${theme.accent};BOLD` : '';
+        setCell(rowY, 2, pointer, pointerKey);
+
+        const nameStr = cmd.name.padEnd(10);
+        const nameKey = isSelected
+          ? `BG:${rowBg};FG:${theme.accent};BOLD`
+          : theme.tagline;
+        for (let k = 0; k < nameStr.length && 4 + k < W; k++) {
+          setCell(rowY, 4 + k, nameStr[k]!, nameKey);
+        }
+
+        const descX = 15;
+        const descKey = isSelected ? `BG:${rowBg};FG:#9ca3af` : dimColor;
+        for (let k = 0; k < cmd.description.length && descX + k < W; k++) {
+          setCell(rowY, descX + k, cmd.description[k]!, descKey);
+        }
+      }
+    }
+
+    // ── Paint logs / terminal scrollback ─────────────────────────────────────
+    function paintLogs() {
       const outputStartY = streamH + 3;
       const availableRows = Math.max(0, H - outputStartY);
 
       if (availableRows > 0 && logs.length > 0) {
         const visibleLogs = logs.slice(-availableRows);
+        const promptCol = theme.userTalk?.prompt || theme.accent;
+        const userTextCol = theme.userTalk?.text || theme.inputText;
+        const badgeCol = theme.agentTalk?.badge || theme.accentStrong;
+        const agentTextCol = theme.agentTalk?.text || theme.secondary;
+
         visibleLogs.forEach((logLine, idx) => {
           const rowY = outputStartY + idx;
-          const isHistoryCmd = logLine.startsWith('> ');
-          const isError     = logLine.includes('[error') || logLine.includes('error:');
-          const isSystemTag = logLine.startsWith('[theme]') || logLine.startsWith('[info]') || logLine.includes('success:');
-          const isWarning   = logLine.includes('[warn') || logLine.includes('warning:');
-          const isAgent     = logLine.includes('[neoloop]') || logLine.startsWith('agent:');
-          const isBullet    = /^\s+[•·\-\*]/.test(logLine);
-
-          // Colour aliases from the 4-colour logo family
-          const gold       = theme.accent;                             // #FFE600 — user only
-          const hotRed     = theme.accentStrong;                       // #FF007F — badges & bullets
-          const deepOrange = theme.agentTalk?.text   || '#FF4500';     // #FF4500 — agent body text
-          const crimson    = theme.secondary;                          // #8B1A00 — dim/shadow text
-          const dimRed     = theme.agentTalk?.dim    || '#CC2200';     // #CC2200 — muted detail
-
-          if (isHistoryCmd) {
-            // ── User command  ›  gold prompt + gold text ──────────────────
+          if (logLine.startsWith('> ')) {
+            // User submitted command line
             writeRow(rowY, 2, '> ', promptCol);
             writeRow(rowY, 4, logLine.slice(2, W - 5), userTextCol);
-
-          } else if (isAgent) {
-            // ── [neoloop] badge  ›  red badge + orange body ───────────────
-            if (logLine.startsWith('[neoloop]')) {
-              const badge = '[neoloop]';
-              const rest  = logLine.slice(badge.length);
-              writeRow(rowY, 2, badge, hotRed);
-              writeRow(rowY, 2 + badge.length, rest.slice(0, W - 3 - badge.length), deepOrange);
-            } else {
-              writeRow(rowY, 2, logLine.slice(0, W - 3), deepOrange);
-            }
-
-          } else if (isSystemTag) {
-            // ── [theme] / [info] system output  ›  red badge + crimson body ──
-            const tagMatch = /^(\[[^\]]+\])\s?(.*)$/.exec(logLine);
-            if (tagMatch) {
-              const tag  = tagMatch[1]!;
-              const body = tagMatch[2]!;
-              writeRow(rowY, 2, tag, hotRed);
-              writeRow(rowY, 2 + tag.length + 1, body.slice(0, W - 4 - tag.length), deepOrange);
-            } else {
-              writeRow(rowY, 2, logLine.slice(0, W - 3), deepOrange);
-            }
-
-          } else if (isBullet) {
-            // ── Bullet list items  ›  red bullet + orange name + dim desc ──
-            // Format: "  • name    — Description" or "  • name — Desc * (active)"
-            const bulletMatch = /^(\s+)([•·\-\*])\s+(.*)$/.exec(logLine);
-            if (bulletMatch) {
-              const indent  = bulletMatch[1]!.length;
-              const bullet  = bulletMatch[2]!;
-              const content = bulletMatch[3]!;
-
-              // Write bullet in hot red
-              writeRow(rowY, indent + 2, bullet, hotRed);
-
-              // Split "name    — Description" on em-dash or spaced dash
-              const dashIdx = content.search(/\s+[—–-]\s+/);
-              if (dashIdx > -1) {
-                const name    = content.slice(0, dashIdx);
-                const sep     = content.slice(dashIdx).match(/\s+[—–-]\s+/)![0]!;
-                const desc    = content.slice(dashIdx + sep.length);
-                const isActive = desc.includes('*') || desc.includes('(active)');
-                const nameCol = isActive ? gold : crimson;         // active→gold, rest→crimson
-                const descCol = isActive ? deepOrange : dimRed;    // active→orange, rest→dim
-                writeRow(rowY, indent + 4, name.slice(0, W), nameCol);
-                writeRow(rowY, indent + 4 + name.length, sep, dimRed);
-                writeRow(rowY, indent + 4 + name.length + sep.length, desc.slice(0, W), descCol);
-              } else {
-                // No dash separator — plain bullet content
-                writeRow(rowY, indent + 4, content.slice(0, W - indent - 6), crimson);
-              }
-            } else {
-              writeRow(rowY, 2, logLine.slice(0, W - 3), crimson);
-            }
-
-          } else if (isError) {
-            // ── Error  ›  hot red ─────────────────────────────────────────
+          } else if (logLine.startsWith('Theme set to ')) {
+            // Dim confirmation line
+            writeRow(rowY, 2, logLine.slice(0, W - 3), '#6b7280');
+          } else if (logLine.startsWith('[error') || logLine.includes('error:')) {
             writeRow(rowY, 2, logLine.slice(0, W - 3), theme.error);
-
-          } else if (isWarning) {
-            // ── Warning  ›  deep crimson ──────────────────────────────────
-            writeRow(rowY, 2, logLine.slice(0, W - 3), theme.warning);
-
+          } else if (logLine.startsWith('Commands:') || logLine.startsWith('Shortcuts:')) {
+            writeRow(rowY, 2, logLine.slice(0, W - 3), theme.accent);
+          } else if (logLine.startsWith('[neoloop]') || logLine.startsWith('agent:')) {
+            const badge = '[neoloop]';
+            if (logLine.startsWith(badge)) {
+              writeRow(rowY, 2, badge, badgeCol);
+              writeRow(rowY, 2 + badge.length, logLine.slice(badge.length, W - 3), agentTextCol);
+            } else {
+              writeRow(rowY, 2, logLine.slice(0, W - 3), agentTextCol);
+            }
           } else {
-            // ── Generic system output  ›  deep orange (NOT gold) ──────────
-            writeRow(rowY, 2, logLine.slice(0, W - 3), deepOrange);
+            // Generic minimal unprefixed log output
+            writeRow(rowY, 2, logLine.slice(0, W - 3), theme.text);
           }
         });
       }
     }
 
-    // ── paint custom copy / paste window ───────────────────────────────────
-    function paintCopyWindow() {
-      const actions = getMenuActions();
-      const winW = 31;
-      const winH = actions.length + 2;
-      const innerW = winW - 2;
-
-      const winX0 = Math.max(2, Math.min(W - winW - 2, copyWindowX));
-      const winY0 = Math.max(streamH + 3, copyWindowY);
-
-      const setCell = (y: number, x: number, ch: string, col: string) => {
-        if (y >= 0 && y < H && x >= 0 && x < W) {
-          const idx = y * W + x;
-          chars[idx] = ch;
-          colors[idx] = col;
-        }
-      };
-
-      const writeStr = (y: number, startX: number, text: string, col: string) => {
-        for (let k = 0; k < text.length && startX + k < W; k++) {
-          setCell(y, startX + k, text[k]!, col);
-        }
-      };
-
-      // Clear window interior
-      for (let y = winY0; y < winY0 + winH; y++) {
-        for (let x = winX0; x < winX0 + winW; x++) {
-          setCell(y, x, ' ', theme.surface);
-        }
-      }
-
-      // Top border: ┌─ CLIPBOARD ─────────────────┐
-      const titleTag = ' CLIPBOARD ';
-      const rightDashes = innerW - 1 - titleTag.length;
-      const topBorder = '┌─' + titleTag + '─'.repeat(Math.max(0, rightDashes)) + '┐';
-      writeStr(winY0, winX0, topBorder, theme.border);
-      writeStr(winY0, winX0 + 2, titleTag, theme.accent);
-
-      // Menu items
-      actions.forEach((act, idx) => {
-        const isSelected = idx === selectedOptionIdx;
-        const y = winY0 + 1 + idx;
-        const prefix = isSelected ? ` > ${act.title}` : `   ${act.title}`;
-        const badge = act.badge;
-        const padding = Math.max(1, innerW - prefix.length - badge.length - 1);
-        const rowStr = '│' + prefix + ' '.repeat(padding) + badge + ' │';
-
-        writeStr(y, winX0, rowStr, theme.border);
-        writeStr(y, winX0 + 1, prefix, isSelected ? theme.accent : theme.text);
-        writeStr(y, winX0 + winW - 2 - badge.length, badge, isSelected ? theme.accent : theme.textMuted);
-      });
-
-      // Bottom border: └─────────────────────────────┘
-      const botBorder = '└' + '─'.repeat(innerW) + '┘';
-      writeStr(winY0 + winH - 1, winX0, botBorder, theme.border);
-    }
-
-    // ── mouse event handler ───────────────────────────────────────────────
-    function handleMouseEvent(b: number, col: number, row: number, isPress: boolean, isRelease: boolean) {
-      const btn = b & 3;
-      const isLeft = btn === 0;
-      const isRight = btn === 2;
-      const isMotion = (b & 32) !== 0;
-      const isWheelUp = b === 64;
-      const isWheelDown = b === 65;
-
-      const actions = getMenuActions();
-      const winW = 31;
-      const winH = actions.length + 2;
-      const winX0 = Math.max(2, Math.min(W - winW - 2, copyWindowX));
-      const winY0 = Math.max(streamH + 3, copyWindowY);
-
-      if (copyWindowOpen && (isWheelUp || isWheelDown)) {
-        if (isWheelUp) {
-          selectedOptionIdx = (selectedOptionIdx - 1 + actions.length) % actions.length;
-        } else {
-          selectedOptionIdx = (selectedOptionIdx + 1) % actions.length;
-        }
-        return;
-      }
-
-      if (copyWindowOpen) {
-        if (isMotion) {
-          if (col >= winX0 && col < winX0 + winW && row > winY0 && row < winY0 + winH - 1) {
-            const optIdx = row - (winY0 + 1);
-            if (optIdx >= 0 && optIdx < actions.length) {
-              selectedOptionIdx = optIdx;
-            }
-          }
-          return;
-        }
-
-        if (isLeft && isPress) {
-          if (col >= winX0 && col < winX0 + winW && row >= winY0 && row < winY0 + winH) {
-            const optIdx = row - (winY0 + 1);
-            if (optIdx >= 0 && optIdx < actions.length) {
-              actions[optIdx]!.action();
-              return;
-            }
-            return;
-          }
-          copyWindowOpen = false;
-        }
-      }
-
-      const topY = streamH;
-      const promptY = streamH + 1;
-      const botY = streamH + 2;
-
-      if (isRight && isPress) {
-        if (row >= topY && row <= botY) {
-          copyWindowX = Math.max(2, Math.min(W - winW - 2, col - 2));
-          copyWindowY = streamH + 3;
-          copyWindowOpen = true;
-          selectedOptionIdx = inputBuffer ? 0 : 1;
-          return;
-        } else {
-          if (copyWindowOpen) {
-            copyWindowOpen = false;
-          }
-          return;
-        }
-      }
-
-      if (isLeft && isPress) {
-        if (row >= topY && row <= botY) {
-          const contentX = 4;
-          if (row === promptY && col >= contentX) {
-            cursorIdx = Math.max(0, Math.min(inputBuffer.length, col - contentX));
-            isSelectedAll = false;
-          }
-          if (copyWindowOpen) {
-            copyWindowOpen = false;
-          }
-          return;
-        }
-      }
-    }
-
-    // ── diff & flush ───────────────────────────────────────────────────────
+    // ── Diff & flush frame ───────────────────────────────────────────────────
     function diff(): string {
       let s = '';
       for (let y = 0; y < H; y++) {
@@ -1030,19 +929,29 @@ export function runSplash({
         let x = 0;
         while (x < W) {
           let i = base + x;
-          if (chars[i] === prevC[i] && colors[i] === prevK[i]) { x++; continue; }
+          if (chars[i] === prevC[i] && colors[i] === prevK[i]) {
+            x++;
+            continue;
+          }
           let end = x;
           let gap = 0;
           for (let k = x + 1; k < W; k++) {
             i = base + k;
-            if (chars[i] !== prevC[i] || colors[i] !== prevK[i]) { end = k; gap = 0; }
-            else if (++gap > 4) break;
+            if (chars[i] !== prevC[i] || colors[i] !== prevK[i]) {
+              end = k;
+              gap = 0;
+            } else if (++gap > 4) {
+              break;
+            }
           }
           s += `\x1b[${y + 1};${x + 1}H`;
           let last = '';
           for (let k = x; k <= end; k++) {
             const key = colors[base + k]!;
-            if (key !== last) { s += key ? sgr(key, theme) : '\x1b[0m'; last = key; }
+            if (key !== last) {
+              s += key ? sgr(key) : '\x1b[0m';
+              last = key;
+            }
             s += chars[base + k];
           }
           x = end + 1;
@@ -1071,8 +980,12 @@ export function runSplash({
       paintContent();
       paintInputBar();
 
-      if (copyWindowOpen) {
-        paintCopyWindow();
+      if (mode === 'themePicker') {
+        paintThemePicker();
+      } else if (mode === 'slashMenu') {
+        paintSlashMenu();
+      } else {
+        paintLogs();
       }
 
       if (Date.now() - lastFull > FULL_REPAINT_MS) {
@@ -1080,13 +993,14 @@ export function runSplash({
         prevK.fill(null);
         lastFull = Date.now();
       }
+
       const s = diff();
       if (s) out.write(s);
       prevC = chars.slice();
       prevK = colors.slice();
     }
 
-    // ── cleanup & resolve ──────────────────────────────────────────────────
+    // ── Cleanup & teardown ───────────────────────────────────────────────────
     function cleanup() {
       if (!running) return;
       running = false;
@@ -1096,298 +1010,305 @@ export function runSplash({
       out.off('resize', init);
       inp.off('data', onData);
       process.off('exit', cleanup);
-      out.write('\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[0m\x1b[?25h\x1b[?1049l');
-      try { inp.setRawMode(false); } catch { /* ignore */ }
+
+      // Restore terminal: disable bracketed paste, ensure mouse tracking off, show cursor, exit alt screen
+      out.write('\x1b[?2004l\x1b[?1000l\x1b[?1002l\x1b[?1006l\x1b[0m\x1b[?25h\x1b[?1049l');
+      try {
+        inp.setRawMode(false);
+      } catch {
+        /* ignore */
+      }
       inp.pause();
     }
 
-    // ── keyboard & mouse data dispatcher ───────────────────────────────────
-    function onData(buf: Buffer) {
-      const s = buf.toString();
+    // ── Command execution context ────────────────────────────────────────────
+    const commandContext: CommandContext = {
+      openThemePicker: () => {
+        pickerInitialTheme = theme;
+        const curIdx = THEMES.findIndex(t => t.id === theme.id);
+        themePickerSelectedIndex = curIdx >= 0 ? curIdx : 0;
+        themePickerScrollOffset = 0;
+        filterQuery = '';
+        mode = 'themePicker';
+      },
+      showHelp: () => {
+        logs.push('Commands:');
+        logs.push('  /theme    Change color theme');
+        logs.push('  /help     Show commands and shortcuts');
+        logs.push('  /clear    Clear the output log');
+        logs.push('  /exit     Quit NeoLoop');
+        logs.push('');
+        logs.push('Shortcuts:');
+        logs.push('  Ctrl+C    Quit NeoLoop');
+        logs.push('  Esc       Clear line / Close menu');
+        logs.push('  Tab       Complete slash command');
+        logs.push('  ↑/↓       Command history / Menu navigation');
+      },
+      clearLogs: () => {
+        logs.length = 0;
+      },
+      exit: () => {
+        cleanup();
+        process.exit(0);
+      },
+      log: (msg: string) => {
+        logs.push(msg);
+      },
+    };
 
-      let match: RegExpExecArray | null;
-      const sgrRegex = /\x1b\[<(\d+);(\d+);(\d+)([Mm])/g;
-      let mouseHandled = false;
-
-      while ((match = sgrRegex.exec(s)) !== null) {
-        mouseHandled = true;
-        const b = parseInt(match[1]!, 10);
-        const col = parseInt(match[2]!, 10) - 1;
-        const row = parseInt(match[3]!, 10) - 1;
-        const isRelease = match[4] === 'm';
-        const isPress = match[4] === 'M';
-        handleMouseEvent(b, col, row, isPress, isRelease);
-      }
-
-      const x10Regex = /\x1b\[M([\s\S]{3})/g;
-      while ((match = x10Regex.exec(s)) !== null) {
-        mouseHandled = true;
-        const b3 = match[1]!;
-        const b = b3.charCodeAt(0) - 32;
-        const col = b3.charCodeAt(1) - 32 - 1;
-        const row = b3.charCodeAt(2) - 32 - 1;
-        const isRelease = (b & 3) === 3;
-        const isPress = !isRelease;
-        handleMouseEvent(b, col, row, isPress, isRelease);
-      }
-
-      const remaining = s.replace(sgrRegex, '').replace(x10Regex, '');
-      if (!remaining && mouseHandled) {
-        return;
-      }
-
-      const keyInput = remaining || s;
-
-      // Ctrl-C
-      if (keyInput === '\x03' || (buf.length === 1 && buf[0] === 3)) {
-        if (copyWindowOpen) {
-          copyWindowOpen = false;
-          return;
-        }
-        if (isSelectedAll && inputBuffer) {
-          copyToClipboard(inputBuffer);
-          showToast(`Copied selection (${inputBuffer.length} chars)`);
-          return;
-        }
-        if (inputBuffer) {
-          copyToClipboard(inputBuffer);
-          const now = Date.now();
-          if (now - lastCtrlCTime < 1500) {
-            cleanup();
-            process.exit(0);
-          }
-          lastCtrlCTime = now;
-          showToast('Copied input! (Press Ctrl+C again to exit)');
-          return;
-        }
+    // ── Key Event Dispatcher ─────────────────────────────────────────────────
+    function handleKeyAction(action: KeyAction) {
+      // Ctrl-C always exits cleanly
+      if (action.type === 'ctrl-c') {
         cleanup();
         process.exit(0);
       }
 
-      if (copyWindowOpen) {
-        const actions = getMenuActions();
+      // ───────────────────────────────────────────────────────────────────────
+      // MODE: Theme Picker
+      // ───────────────────────────────────────────────────────────────────────
+      if (mode === 'themePicker') {
+        const filtered = getFilteredThemes();
 
-        if (keyInput === '\x1b[A' || keyInput === '\x1bOA') {
-          selectedOptionIdx = (selectedOptionIdx - 1 + actions.length) % actions.length;
+        if (action.type === 'esc') {
+          // Esc cancels: restore initial theme and close picker
+          setCurrentTheme(pickerInitialTheme, false);
+          mode = 'input';
+          filterQuery = '';
           return;
         }
-        if (keyInput === '\x1b[B' || keyInput === '\x1bOB') {
-          selectedOptionIdx = (selectedOptionIdx + 1) % actions.length;
-          return;
-        }
-        if (keyInput === '\r' || keyInput === '\n' || keyInput === ' ') {
-          actions[selectedOptionIdx]!.action();
-          return;
-        }
-        if (/^[1-5]$/.test(keyInput)) {
-          const idx = parseInt(keyInput, 10) - 1;
-          if (actions[idx]) actions[idx]!.action();
-          return;
-        }
-        if (keyInput === 'c' || keyInput === 'C') {
-          actions[0]!.action();
-          return;
-        }
-        if (keyInput === 'v' || keyInput === 'V') {
-          actions[1]!.action();
-          return;
-        }
-        if (keyInput === 'a' || keyInput === 'A') {
-          actions[2]!.action();
-          return;
-        }
-        if (keyInput === 'x' || keyInput === 'X') {
-          actions[3]!.action();
-          return;
-        }
-        if (keyInput === 'l' || keyInput === 'L') {
-          actions[4]!.action();
-          return;
-        }
-        if (keyInput === '\x1b') {
-          copyWindowOpen = false;
-          return;
-        }
-        return;
-      }
 
-      // Ctrl+A (Select All)
-      if (keyInput === '\x01' || (buf.length === 1 && buf[0] === 1)) {
-        if (copyWindowOpen) {
-          copyWindowOpen = false;
+        if (action.type === 'up') {
+          if (filtered.length > 0) {
+            themePickerSelectedIndex =
+              (themePickerSelectedIndex - 1 + filtered.length) % filtered.length;
+            // Live preview immediately
+            setCurrentTheme(filtered[themePickerSelectedIndex]!, false);
+          }
+          return;
         }
-        if (inputBuffer.length > 0) {
-          isSelectedAll = true;
-          cursorIdx = inputBuffer.length;
-          showToast(`Selected all (${inputBuffer.length} chars)`);
-        } else {
-          showToast('Input bar is empty');
-        }
-        return;
-      }
 
-      // Ctrl+V (Paste) or Shift+Insert
-      if (keyInput === '\x16' || (buf.length === 1 && buf[0] === 22) || keyInput === '\x1b[2~') {
-        readFromClipboard().then(pasted => {
-          if (pasted) {
-            const clean = pasted.replace(/[\r\n]+/g, ' ');
-            if (isSelectedAll) {
-              inputBuffer = clean;
-              cursorIdx = clean.length;
-              isSelectedAll = false;
-            } else {
-              inputBuffer = inputBuffer.slice(0, cursorIdx) + clean + inputBuffer.slice(cursorIdx);
-              cursorIdx += clean.length;
+        if (action.type === 'down') {
+          if (filtered.length > 0) {
+            themePickerSelectedIndex = (themePickerSelectedIndex + 1) % filtered.length;
+            // Live preview immediately
+            setCurrentTheme(filtered[themePickerSelectedIndex]!, false);
+          }
+          return;
+        }
+
+        if (action.type === 'enter') {
+          if (filtered.length > 0) {
+            const confirmed = filtered[themePickerSelectedIndex]!;
+            setCurrentTheme(confirmed, true);
+            pickerInitialTheme = confirmed;
+            logs.push(`Theme set to ${confirmed.name}`);
+          } else {
+            setCurrentTheme(pickerInitialTheme, false);
+          }
+          mode = 'input';
+          filterQuery = '';
+          return;
+        }
+
+        if (action.type === 'backspace') {
+          if (filterQuery.length > 0) {
+            filterQuery = filterQuery.slice(0, -1);
+            const nextFiltered = getFilteredThemes();
+            themePickerSelectedIndex = 0;
+            if (nextFiltered.length > 0) {
+              setCurrentTheme(nextFiltered[0]!, false);
             }
-            showToast(`Pasted ${clean.length} chars`);
-          } else {
-            showToast('Clipboard is empty');
           }
-        }).catch(() => {
-          showToast('Could not read clipboard');
-        });
-        return;
-      }
-
-      // Bracketed Paste Mode
-      if (keyInput.includes('\x1b[200~')) {
-        const bpMatch = /\x1b\[200~([\s\S]*?)\x1b\[201~/.exec(keyInput);
-        if (bpMatch) {
-          const clean = bpMatch[1]!.replace(/[\r\n]+/g, ' ');
-          if (isSelectedAll) {
-            inputBuffer = clean;
-            cursorIdx = clean.length;
-            isSelectedAll = false;
-          } else {
-            inputBuffer = inputBuffer.slice(0, cursorIdx) + clean + inputBuffer.slice(cursorIdx);
-            cursorIdx += clean.length;
-          }
-          showToast(`Pasted ${clean.length} chars`);
           return;
         }
-      }
 
-      // Ctrl+X (Cut)
-      if (keyInput === '\x18' || (buf.length === 1 && buf[0] === 24)) {
-        if (inputBuffer) {
-          copyToClipboard(inputBuffer);
-          showToast(`Cut ${inputBuffer.length} chars`);
-          inputBuffer = '';
-          cursorIdx = 0;
-          isSelectedAll = false;
-        } else {
-          showToast('Input bar is empty');
-        }
-        return;
-      }
+        if (action.type === 'char') {
+          // Keys 1-9 jump to that row in the filtered list
+          if (/^[1-9]$/.test(action.char)) {
+            const jumpIdx = parseInt(action.char, 10) - 1;
+            if (jumpIdx < filtered.length) {
+              themePickerSelectedIndex = jumpIdx;
+              setCurrentTheme(filtered[jumpIdx]!, false);
+              return;
+            }
+          }
 
-      // F2 or Alt+C toggles Custom Copy Window
-      if (keyInput === '\x1bOQ' || keyInput === '\x1b[12~' || keyInput === '\x1b[OQ' || keyInput === '\x1bc') {
-        const winW = 31;
-        copyWindowX = Math.max(2, Math.floor((W - winW) / 2));
-        copyWindowY = streamH + 3;
-        copyWindowOpen = !copyWindowOpen;
-        selectedOptionIdx = inputBuffer ? 0 : 1;
-        return;
-      }
-
-      // Escape key clears selection or input bar
-      if (keyInput === '\x1b') {
-        if (isSelectedAll) {
-          isSelectedAll = false;
-          showToast('Selection cleared');
+          // Letters and characters filter the list by name
+          filterQuery += action.char;
+          const nextFiltered = getFilteredThemes();
+          themePickerSelectedIndex = 0;
+          if (nextFiltered.length > 0) {
+            setCurrentTheme(nextFiltered[0]!, false);
+          }
           return;
         }
-        if (inputBuffer) {
-          inputBuffer = '';
-          cursorIdx = 0;
-          showToast('Input bar cleared');
+
+        return;
+      }
+
+      // ───────────────────────────────────────────────────────────────────────
+      // MODE: Slash Command Menu
+      // ───────────────────────────────────────────────────────────────────────
+      if (mode === 'slashMenu') {
+        const matching = getMatchingCommands();
+
+        if (action.type === 'esc') {
+          // Esc closes the menu without clearing the input
+          mode = 'input';
+          return;
         }
+
+        if (action.type === 'up') {
+          if (matching.length > 0) {
+            slashMenuSelectedIndex =
+              (slashMenuSelectedIndex - 1 + matching.length) % matching.length;
+          }
+          return;
+        }
+
+        if (action.type === 'down') {
+          if (matching.length > 0) {
+            slashMenuSelectedIndex = (slashMenuSelectedIndex + 1) % matching.length;
+          }
+          return;
+        }
+
+        if (action.type === 'tab') {
+          if (matching.length > 0) {
+            const chosen = matching[slashMenuSelectedIndex]!;
+            inputBuffer = chosen.name;
+            cursorIdx = inputBuffer.length;
+          }
+          return;
+        }
+
+        if (action.type === 'enter') {
+          if (matching.length > 0) {
+            const chosen = matching[slashMenuSelectedIndex]!;
+            inputBuffer = '';
+            cursorIdx = 0;
+            historyIndex = -1;
+            savedDraft = '';
+            commandHistory.push(chosen.name);
+            logs.push('> ' + chosen.name);
+            chosen.run(commandContext);
+          } else {
+            mode = 'input';
+          }
+          return;
+        }
+
+        if (action.type === 'backspace') {
+          if (cursorIdx > 0) {
+            inputBuffer = inputBuffer.slice(0, cursorIdx - 1) + inputBuffer.slice(cursorIdx);
+            cursorIdx--;
+            if (!inputBuffer.startsWith('/')) {
+              mode = 'input';
+            } else {
+              slashMenuSelectedIndex = 0;
+            }
+          }
+          return;
+        }
+
+        if (action.type === 'delete') {
+          if (cursorIdx < inputBuffer.length) {
+            inputBuffer = inputBuffer.slice(0, cursorIdx) + inputBuffer.slice(cursorIdx + 1);
+            if (!inputBuffer.startsWith('/')) {
+              mode = 'input';
+            } else {
+              slashMenuSelectedIndex = 0;
+            }
+          }
+          return;
+        }
+
+        if (action.type === 'left') {
+          cursorIdx = Math.max(0, cursorIdx - 1);
+          return;
+        }
+
+        if (action.type === 'right') {
+          cursorIdx = Math.min(inputBuffer.length, cursorIdx + 1);
+          return;
+        }
+
+        if (action.type === 'home') {
+          cursorIdx = 0;
+          return;
+        }
+
+        if (action.type === 'end') {
+          cursorIdx = inputBuffer.length;
+          return;
+        }
+
+        if (action.type === 'paste') {
+          inputBuffer =
+            inputBuffer.slice(0, cursorIdx) + action.text + inputBuffer.slice(cursorIdx);
+          cursorIdx += action.text.length;
+          if (!inputBuffer.startsWith('/')) {
+            mode = 'input';
+          } else {
+            slashMenuSelectedIndex = 0;
+          }
+          return;
+        }
+
+        if (action.type === 'char') {
+          inputBuffer =
+            inputBuffer.slice(0, cursorIdx) + action.char + inputBuffer.slice(cursorIdx);
+          cursorIdx += action.char.length;
+          slashMenuSelectedIndex = 0;
+          return;
+        }
+
         return;
       }
 
-      if (!inputVisible) {
+      // ───────────────────────────────────────────────────────────────────────
+      // MODE: Input
+      // ───────────────────────────────────────────────────────────────────────
+      if (!inputVisible) return;
+
+      if (action.type === 'esc') {
+        // Esc clears the line
+        inputBuffer = '';
+        cursorIdx = 0;
+        historyIndex = -1;
+        savedDraft = '';
         return;
       }
 
-      // ── Cursor navigation ───────────────────────────────────────────────
-      if (keyInput === '\x1b[D' || keyInput === '\x1bOD') {
-        isSelectedAll = false;
+      if (action.type === 'left') {
         cursorIdx = Math.max(0, cursorIdx - 1);
         return;
       }
-      if (keyInput === '\x1b[C' || keyInput === '\x1bOC') {
-        isSelectedAll = false;
+
+      if (action.type === 'right') {
         cursorIdx = Math.min(inputBuffer.length, cursorIdx + 1);
         return;
       }
-      if (keyInput === '\x1b[H' || keyInput === '\x1b[1~' || keyInput === '\x1b[7~') {
-        isSelectedAll = false;
+
+      if (action.type === 'home') {
         cursorIdx = 0;
         return;
       }
-      if (keyInput === '\x1b[F' || keyInput === '\x1b[4~' || keyInput === '\x1b[8~') {
-        isSelectedAll = false;
+
+      if (action.type === 'end') {
         cursorIdx = inputBuffer.length;
         return;
       }
-      if (keyInput === '\x1b[3~') {
-        if (isSelectedAll) {
-          inputBuffer = '';
-          cursorIdx = 0;
-          isSelectedAll = false;
-          return;
-        }
+
+      if (action.type === 'delete') {
         if (cursorIdx < inputBuffer.length) {
           inputBuffer = inputBuffer.slice(0, cursorIdx) + inputBuffer.slice(cursorIdx + 1);
         }
         return;
       }
 
-      if (keyInput.startsWith('\x1b')) return;
-
-      // ── Enter: submit command ───────────────────────────────────────────
-      if (keyInput === '\r' || keyInput === '\n') {
-        isSelectedAll = false;
-        const trimmed = inputBuffer.trim();
-        if (trimmed) {
-          logs.push('> ' + trimmed);
-          const cmd = trimmed;
-          inputBuffer = '';
-          cursorIdx = 0;
-
-          // Dispatch slash commands (/theme, /themes, /help)
-          const isSlash = processSlashCommand(cmd, (msg: string) => {
-            logs.push(msg);
-          });
-
-          if (!isSlash) {
-            if (onCommand) {
-              try {
-                Promise.resolve(onCommand(cmd, (msg: string) => {
-                  logs.push(msg);
-                })).catch(err => {
-                  logs.push(`[error] ${err?.message || err}`);
-                });
-              } catch (err: any) {
-                logs.push(`[error] ${err?.message || err}`);
-              }
-            } else {
-              logs.push(`[neoloop] processing: "${cmd}"`);
-            }
-          }
-        }
-        return;
-      }
-
-      // ── Backspace ───────────────────────────────────────────────────────
-      if (keyInput === '\x7f' || keyInput === '\x08') {
-        if (isSelectedAll) {
-          inputBuffer = '';
-          cursorIdx = 0;
-          isSelectedAll = false;
-          return;
-        }
+      if (action.type === 'backspace') {
         if (cursorIdx > 0) {
           inputBuffer = inputBuffer.slice(0, cursorIdx - 1) + inputBuffer.slice(cursorIdx);
           cursorIdx--;
@@ -1395,32 +1316,162 @@ export function runSplash({
         return;
       }
 
-      // ── Printable characters ────────────────────────────────────────────
-      const printable = keyInput.replace(/[\x00-\x1f\x7f]/g, '');
-      if (printable) {
-        if (isSelectedAll) {
-          inputBuffer = printable;
-          cursorIdx = printable.length;
-          isSelectedAll = false;
+      if (action.type === 'up') {
+        // Browse command history backwards
+        if (commandHistory.length > 0) {
+          if (historyIndex === -1) {
+            savedDraft = inputBuffer;
+            historyIndex = commandHistory.length - 1;
+          } else if (historyIndex > 0) {
+            historyIndex--;
+          }
+          if (historyIndex >= 0 && historyIndex < commandHistory.length) {
+            inputBuffer = commandHistory[historyIndex]!;
+            cursorIdx = inputBuffer.length;
+          }
+        }
+        return;
+      }
+
+      if (action.type === 'down') {
+        // Browse command history forwards
+        if (historyIndex !== -1) {
+          historyIndex++;
+          if (historyIndex >= commandHistory.length) {
+            historyIndex = -1;
+            inputBuffer = savedDraft;
+            cursorIdx = inputBuffer.length;
+          } else {
+            inputBuffer = commandHistory[historyIndex]!;
+            cursorIdx = inputBuffer.length;
+          }
+        }
+        return;
+      }
+
+      if (action.type === 'paste') {
+        inputBuffer =
+          inputBuffer.slice(0, cursorIdx) + action.text + inputBuffer.slice(cursorIdx);
+        cursorIdx += action.text.length;
+        if (inputBuffer.startsWith('/')) {
+          mode = 'slashMenu';
+          slashMenuSelectedIndex = 0;
+        }
+        return;
+      }
+
+      if (action.type === 'char') {
+        inputBuffer =
+          inputBuffer.slice(0, cursorIdx) + action.char + inputBuffer.slice(cursorIdx);
+        cursorIdx += action.char.length;
+        if (inputBuffer.startsWith('/')) {
+          mode = 'slashMenu';
+          slashMenuSelectedIndex = 0;
+        }
+        return;
+      }
+
+      if (action.type === 'enter') {
+        const trimmed = inputBuffer.trim();
+        inputBuffer = '';
+        cursorIdx = 0;
+        historyIndex = -1;
+        savedDraft = '';
+
+        if (!trimmed) return;
+
+        commandHistory.push(trimmed);
+        logs.push('> ' + trimmed);
+
+        // Command routing
+        if (trimmed === '/theme') {
+          commandContext.openThemePicker();
+          return;
+        }
+
+        if (trimmed.startsWith('/theme ')) {
+          const themeNameOrId = trimmed.slice(7).trim();
+          const target = THEMES.find(
+            t =>
+              t.id.toLowerCase() === themeNameOrId.toLowerCase() ||
+              t.name.toLowerCase() === themeNameOrId.toLowerCase()
+          );
+          if (target) {
+            setCurrentTheme(target, true);
+            logs.push(`Theme set to ${target.name}`);
+          } else {
+            logs.push(`Unknown theme: ${themeNameOrId}`);
+          }
+          return;
+        }
+
+        if (trimmed === '/help') {
+          commandContext.showHelp();
+          return;
+        }
+
+        if (trimmed === '/clear') {
+          commandContext.clearLogs();
+          return;
+        }
+
+        if (trimmed === '/exit') {
+          commandContext.exit();
+          return;
+        }
+
+        if (trimmed.startsWith('/')) {
+          logs.push(`Unknown command: ${trimmed}. Type /help for available commands.`);
+          return;
+        }
+
+        // Forward user message to execution flow
+        if (onCommand) {
+          try {
+            Promise.resolve(
+              onCommand(trimmed, (msg: string) => {
+                logs.push(msg);
+              })
+            ).catch(err => {
+              logs.push(`error: ${err?.message || err}`);
+            });
+          } catch (err: any) {
+            logs.push(`error: ${err?.message || err}`);
+          }
         } else {
-          inputBuffer = inputBuffer.slice(0, cursorIdx) + printable + inputBuffer.slice(cursorIdx);
-          cursorIdx += printable.length;
+          logs.push(`processing: "${trimmed}"`);
         }
       }
     }
 
-    // ── boot ───────────────────────────────────────────────────────────────
+    function onData(buf: Buffer) {
+      const actions = parseKeyActions(buf);
+      for (const action of actions) {
+        handleKeyAction(action);
+      }
+    }
+
+    // ── Boot ─────────────────────────────────────────────────────────────────
     disableWinQuickEdit();
-    out.write('\x1b%G');
-    out.write('\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1002h\x1b[?1006h');
+
+    // UTF-8 mode, enter alternate screen buffer, hide cursor, enable bracketed paste,
+    // turn OFF mouse tracking explicitly (never enable \x1b[?1000h)
+    out.write('\x1b%G\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[?1000l\x1b[?1002l\x1b[?1006l');
     init();
     out.on('resize', init);
     process.on('exit', cleanup);
-    try { inp.setRawMode(true); } catch { /* non-TTY pipe */ }
+
+    try {
+      inp.setRawMode(true);
+    } catch {
+      /* non-TTY pipe */
+    }
     inp.resume();
     inp.on('data', onData);
 
-    cursorTimer = setInterval(() => { cursorOn = !cursorOn; }, CURSOR_BLINK_MS);
+    cursorTimer = setInterval(() => {
+      cursorOn = !cursorOn;
+    }, CURSOR_BLINK_MS);
 
     (function loop() {
       if (!running) return;

@@ -154,7 +154,7 @@ if (SKIP_SPLASH) {
     tagline: TAGLINE,
     onCommand: async (cmd, log) => {
       // Wire command into coding-agent execution flow
-      log(`[neoloop] processing: "${cmd}"`);
+      log(`processing: "${cmd}"`);
     },
   });
 }
