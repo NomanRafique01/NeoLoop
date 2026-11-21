@@ -3,14 +3,14 @@
  *
  * Four-token stealth spy-tool palette:
  *
- *   #e5e7eb  Light silver — LOGO_BODY    — logo fill, borders, prompt >
- *   #374151  Charcoal     — LOGO_SHADING — logo shadow, placeholder, history
- *   #ef4444  Signal red   — TAGLINE      — tagline, typed text
- *   #ffffff  Pure white   — HEAD         — rain heads, blinking cursor
+ *   #8fa3b8  Steel blue-gray — LOGO_BODY    — logo fill, borders, prompt >
+ *   #2f3d4f  Gunmetal        — LOGO_SHADING — logo shadow, placeholder, muted text
+ *   #5eead4  Ice teal        — TAGLINE      — tagline, typed text, selection highlight, agent badge
+ *   #e8f1fa  Frost white     — HEAD         — rain heads, cursor, glow connectors, shimmer
  *
- * Near-monochrome brushed steel aesthetic with a single stark signal-red accent.
- * The silver logo and charcoal shadow look like precision-machined metal,
- * while the red tagline and typed text cut cleanly through the gray canvas.
+ * Near-monochrome brushed steel aesthetic with a cool ice-teal accent.
+ * The steel blue-gray logo and gunmetal shadow evoke precision-machined metal,
+ * while the ice-teal tagline and typed text cut cleanly through the stealth canvas.
  */
 
 import { ThemeTokens } from '../types.js';
@@ -19,49 +19,49 @@ import { ghostProtocolTalk } from './talk.js';
 export const ghostProtocol: ThemeTokens = {
   id: 'ghost-protocol',
   name: 'Ghost Protocol',
-  description: 'Light silver + charcoal + signal red + pure white — stealth spy-tool aesthetic',
+  description: 'Steel blue-gray + gunmetal + ice teal + frost white — stealth spy-tool aesthetic',
 
   // ── Surfaces ───────────────────────────────────────────────────────────────
   background:      '#08090a',   // Matte dark stealth canvas
   surface:         '#111315',   // Deep slate surface
   surfaceElevated: '#1a1d21',   // Elevated dark metal container
-  border:          '#e5e7eb',   // Light silver border (LOGO_BODY)
+  border:          '#8fa3b8',   // Steel blue-gray border (LOGO_BODY)
 
   // ── Typography ─────────────────────────────────────────────────────────────
-  text:      '#f3f4f6',         // Crisp light silver primary text
-  textMuted: '#374151',         // Charcoal muted text (LOGO_SHADING)
+  text:      '#e8f1fa',         // Crisp frost white primary text (HEAD)
+  textMuted: '#2f3d4f',         // Gunmetal muted text (LOGO_SHADING)
 
   // ── Accents ────────────────────────────────────────────────────────────────
-  accent:       '#e5e7eb',      // Light silver primary     (LOGO_BODY)
-  accentStrong: '#ffffff',      // Pure white strong        (HEAD)
-  secondary:    '#ef4444',      // Signal red secondary     (TAGLINE)
+  accent:       '#8fa3b8',      // Steel blue-gray primary  (LOGO_BODY)
+  accentStrong: '#e8f1fa',      // Frost white strong       (HEAD)
+  secondary:    '#5eead4',      // Ice teal secondary       (TAGLINE)
 
   // ── Logo — 4-colour depth rendering ────────────────────────────────────────
-  logo:       '#e5e7eb',        // Light silver — solid █ body          LOGO_BODY
-  logoGlow:   '#ffffff',        // Pure white   — bright connectors ╗╔║ HEAD
-  logoShadow: '#374151',        // Charcoal     — mid shadow ═╝         LOGO_SHADING
-  logoDeep:   '#1f2937',        // Dark slate   — deepest corner ╚ trace
+  logo:       '#8fa3b8',        // Steel blue-gray — solid █ body          LOGO_BODY
+  logoGlow:   '#e8f1fa',        // Frost white     — bright connectors ╗╔║ HEAD
+  logoShadow: '#2f3d4f',        // Gunmetal        — mid shadow ═╝         LOGO_SHADING
+  logoDeep:   '#1b2531',        // Dark slate-navy — deepest corner ╚ trace
 
   // ── Matrix Rain ─────────────────────────────────────────────────────────────
-  matrixRain:     '#e5e7eb',    // Light silver fallback lane base (LOGO_BODY)
-  matrixRainHead: '#ffffff',    // Pure white sharp drop tips (HEAD)
+  matrixRain:     '#8fa3b8',    // Steel blue-gray fallback lane base (LOGO_BODY)
+  matrixRainHead: '#e8f1fa',    // Frost white sharp drop tips (HEAD)
   rainColors: [
-    '#e5e7eb',   // Light silver — LOGO_BODY    (stealth metallic column)
-    '#374151',   // Charcoal     — LOGO_SHADING (shadow column)
-    '#ef4444',   // Signal red   — TAGLINE      (pulse alert column)
+    '#8fa3b8',   // Steel blue-gray — LOGO_BODY    (stealth metallic column)
+    '#2f3d4f',   // Gunmetal        — LOGO_SHADING (shadow column)
+    '#5eead4',   // Ice teal        — TAGLINE      (ice pulse column)
   ],
 
-  // ── Tagline shimmer — signal red base → silver → pure white peak ───────────
-  tagline: '#ef4444',           // Signal red base (TAGLINE)
-  shimmer: '#ffffff',           // Pure white peak (HEAD)
+  // ── Tagline shimmer — ice teal base → steel blue-gray → frost white peak ───
+  tagline: '#5eead4',           // Ice teal base (TAGLINE)
+  shimmer: '#e8f1fa',           // Frost white peak (HEAD)
 
   // ── Input bar ──────────────────────────────────────────────────────────────
-  inputBorder:      ghostProtocolTalk.user.border,       // Light silver dashed border
-  inputText:        ghostProtocolTalk.user.text,         // Signal red typed text
-  inputPlaceholder: '#374151',                         // Charcoal placeholder (LOGO_SHADING)
-  cursor: '#ffffff',                                   // Pure white blinking cursor (HEAD)
+  inputBorder:      ghostProtocolTalk.user.border,       // Steel blue-gray dashed border (LOGO_BODY)
+  inputText:        ghostProtocolTalk.user.text,         // Ice teal typed text (TAGLINE)
+  inputPlaceholder: '#2f3d4f',                         // Gunmetal placeholder (LOGO_SHADING)
+  cursor:           '#e8f1fa',                         // Frost white blinking cursor (HEAD)
 
-  selection: '#ef4444',         // Signal red selection highlight (TAGLINE)
+  selection: '#5eead4',         // Ice teal selection highlight (TAGLINE)
 
   // ── Talk colours ───────────────────────────────────────────────────────────
   userTalk: {
@@ -78,9 +78,9 @@ export const ghostProtocol: ThemeTokens = {
   },
 
   // ── Semantic status ─────────────────────────────────────────────────────────
-  success: '#e5e7eb',           // Light silver — clean confirmation
-  warning: '#ef4444',           // Signal red   — alert / caution
-  error:   '#ef4444',           // Signal red   — error
+  success: '#8fa3b8',           // Steel blue-gray — clean confirmation (LOGO_BODY)
+  warning: '#5eead4',           // Ice teal        — alert / caution    (TAGLINE)
+  error:   '#5eead4',           // Ice teal        — error              (TAGLINE)
 };
 
 export * from './talk.js';

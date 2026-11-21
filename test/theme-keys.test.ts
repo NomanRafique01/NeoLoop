@@ -19,12 +19,13 @@ import { parseKeyActions } from '../src/core/keys.js';
 console.log('Testing Themes system with original tokens...');
 
 // 1. Theme registry verification
-assert.strictEqual(DEFAULT_THEME_ID, 'cyberpunk');
+assert.strictEqual(DEFAULT_THEME_ID, 'red-eclipse');
 assert.strictEqual(THEMES.length, 10);
 
 const expectedThemes = [
-  'cyberpunk',
+  'red-eclipse',
   'dusk-circuit',
+  'cyberpunk',
   'neon-tokyo',
   'arctic-gold',
   'aurora-mint',
@@ -32,7 +33,6 @@ const expectedThemes = [
   'ghost-protocol',
   'rose-signature',
   'deep-space',
-  'red-eclipse',
 ];
 
 for (const id of expectedThemes) {
@@ -71,6 +71,20 @@ assert.deepStrictEqual(
   ['#f2f2f2', '#c1121f', '#ff3b47']
 );
 
+// Check Ghost Protocol tokens specifically
+const gp = getTheme('ghost-protocol');
+assert.strictEqual(gp.name, 'Ghost Protocol');
+assert.strictEqual(gp.logo.toLowerCase(), '#8fa3b8');
+assert.strictEqual(gp.logoGlow.toLowerCase(), '#e8f1fa');
+assert.strictEqual(gp.logoShadow?.toLowerCase(), '#2f3d4f');
+assert.strictEqual(gp.logoDeep?.toLowerCase(), '#1b2531');
+assert.strictEqual(gp.tagline.toLowerCase(), '#5eead4');
+assert.strictEqual(gp.cursor.toLowerCase(), '#e8f1fa');
+assert.deepStrictEqual(
+  gp.rainColors?.map(c => c.toLowerCase()),
+  ['#8fa3b8', '#2f3d4f', '#5eead4']
+);
+
 // Check Cyberpunk original colors specifically
 const cp = getTheme('cyberpunk');
 assert.strictEqual(cp.logo.toUpperCase(), '#FFE600');
@@ -85,7 +99,7 @@ assert.deepStrictEqual(
 // 2. getTheme lookup and fallback
 assert.strictEqual(getTheme('NEON-TOKYO').id, 'neon-tokyo');
 assert.strictEqual(getTheme('Neon Tokyo').id, 'neon-tokyo');
-assert.strictEqual(getTheme('unknown-theme-xyz').id, 'cyberpunk');
+assert.strictEqual(getTheme('unknown-theme-xyz').id, 'red-eclipse');
 
 // 3. getThemeDisplayNameColor
 const normalTheme = getTheme('neon-tokyo');
@@ -102,8 +116,8 @@ fs.writeFileSync(configPath, '{ not json }');
 assert.strictEqual(loadSavedThemeId(), DEFAULT_THEME_ID);
 
 // Restore valid theme
-saveThemeId('cyberpunk');
-assert.strictEqual(loadSavedThemeId(), 'cyberpunk');
+saveThemeId('red-eclipse');
+assert.strictEqual(loadSavedThemeId(), 'red-eclipse');
 
 console.log('Testing Slash Commands Registry...');
 assert.strictEqual(COMMAND_REGISTRY.length, 4);
