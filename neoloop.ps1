@@ -1,5 +1,5 @@
 # NeoLoop CLI - PowerShell Edition
-# Same interface as the CMD/Node version: matrix rain + big ASCII logo + input bar
+# Same interface as the CMD/Node version: matrix rain + big ASCII logo + input bar + theme engine
 
 #region ── ANSI helpers ────────────────────────────────────────────────────────
 function ansi($r,$g,$b,$bold=$false) {
@@ -13,17 +13,70 @@ $ALT_OFF = "`e[?1049l"
 function pos($row,$col) { "`e[$row;${col}H" }
 function clr_screen()   { "`e[2J`e[H" }
 
-# Theme colours (identical to splash.ts)
-$C_BODY    = ansi 57  255 106        # #39ff6a logo body
-$C_SHADE   = ansi 31  158  71        # #1f9e47 logo shading
-$C_TAG     = ansi 57  255 136 $true  # #39FF88 tagline bold
-$C_BORDER  = ansi 57  255 106        # #39ff6a bar borders
-$C_PROMPT  = ansi 57  255 106        # #39ff6a ">"
-$C_TYPED   = ansi 57  255 136        # #39FF88 typed text
-$C_HOLDER  = ansi 31  158  71        # #1f9e47 placeholder
-$C_CURSOR  = ansi 215 255 225        # #d7ffe1 cursor block
-$C_HEAD    = ansi 215 255 225        # matrix rain head
-$PLACEHOLDER = "Type your message or ask NEOLOOP anything..."
+# Theme definition: Phantom (Default)
+$GLOBAL:CurrentTheme = 'phantom'
+
+function Set-NeoTheme($themeName) {
+    $t = $themeName.ToLower().Trim()
+    if ($t -eq 'matrix') {
+        $GLOBAL:CurrentTheme = 'matrix'
+        $GLOBAL:C_BODY    = ansi 57  255 106        # #39ff6a logo body
+        $GLOBAL:C_SHADE   = ansi 31  158  71        # #1f9e47 logo shading
+        $GLOBAL:C_TAG     = ansi 57  255 136 $true  # #39FF88 tagline bold
+        $GLOBAL:C_BORDER  = ansi 31  158  71        # #1f9e47 bar borders
+        $GLOBAL:C_PROMPT  = ansi 57  255 106        # #39ff6a ">"
+        $GLOBAL:C_TYPED   = ansi 57  255 136        # #39FF88 typed text
+        $GLOBAL:C_HOLDER  = ansi 31  158  71        # #1f9e47 placeholder
+        $GLOBAL:C_CURSOR  = ansi 215 255 225        # #d7ffe1 cursor block
+        $GLOBAL:C_HEAD    = ansi 215 255 225        # matrix rain head
+        $GLOBAL:SHADES = for ($i=0;$i -le 20;$i++) {
+            $gv = [int](25 + 230*$i/20)
+            $rv = if ($i -gt 16) { 40 } else { 0 }
+            $bv = [int]($gv * 0.25)
+            ansi $rv $gv $bv
+        }
+    } elseif ($t -eq 'akira') {
+        $GLOBAL:CurrentTheme = 'akira'
+        $GLOBAL:C_BODY    = ansi 255 30  68         # #FF1E44 crimson logo body
+        $GLOBAL:C_SHADE   = ansi 153 11  34         # #990B22 logo shadow
+        $GLOBAL:C_TAG     = ansi 0   229 255 $true  # #00E5FF cyan tagline
+        $GLOBAL:C_BORDER  = ansi 43  23  54         # #2B1736 dark plum border
+        $GLOBAL:C_PROMPT  = ansi 255 184 0          # #FFB800 molten gold prompt
+        $GLOBAL:C_TYPED   = ansi 245 235 230        # #F5EBE6 warm white text
+        $GLOBAL:C_HOLDER  = ansi 92  74  99         # #5C4A63 muted plum placeholder
+        $GLOBAL:C_CURSOR  = ansi 255 30  68         # #FF1E44 crimson cursor block
+        $GLOBAL:C_HEAD    = ansi 255 248 231        # #FFF8E7 star-white head
+        $GLOBAL:SHADES = for ($i=0;$i -le 20;$i++) {
+            $f = 0.08 + 0.92 * [Math]::Pow(($i/20.0), 1.4)
+            $rv = [int](7*0.4 + 255*$f)
+            $gv = [int](5*0.4 + 184*$f)
+            $bv = [int](9*0.4 + 0*$f)
+            ansi $rv $gv $bv
+        }
+    } else {
+        # Phantom theme (default)
+        $GLOBAL:CurrentTheme = 'phantom'
+        $GLOBAL:C_BODY    = ansi 0   255 163        # #00FFA3 spectral mint logo body
+        $GLOBAL:C_SHADE   = ansi 0   122 77         # #007A4D deep jade shadow
+        $GLOBAL:C_TAG     = ansi 255 183 3   $true  # #FFB703 solar amber tagline
+        $GLOBAL:C_BORDER  = ansi 32  39  56         # #202738 dark steel border
+        $GLOBAL:C_PROMPT  = ansi 0   255 163        # #00FFA3 spectral mint ">"
+        $GLOBAL:C_TYPED   = ansi 237 242 247        # #EDF2F7 crisp ghost white text
+        $GLOBAL:C_HOLDER  = ansi 74  87  109        # #4A576D muted slate placeholder
+        $GLOBAL:C_CURSOR  = ansi 0   255 163        # #00FFA3 spectral mint cursor
+        $GLOBAL:C_HEAD    = ansi 243 232 255        # #F3E8FF lilac-white head
+        $GLOBAL:SHADES = for ($i=0;$i -le 20;$i++) {
+            $f = 0.08 + 0.92 * [Math]::Pow(($i/20.0), 1.4)
+            $rv = [int](5*0.4 + 168*$f)
+            $gv = [int](6*0.4 + 85*$f)
+            $bv = [int](10*0.4 + 247*$f)
+            ansi $rv $gv $bv
+        }
+    }
+}
+Set-NeoTheme 'phantom'
+
+$PLACEHOLDER = "Type your message or ask NEOLOOP anything (try /theme)..."
 #endregion
 
 #region ── Big block font (same glyphs as splash.ts) ──────────────────────────
@@ -49,14 +102,6 @@ function Get-BigLogo($name) {
 #region ── Matrix rain ─────────────────────────────────────────────────────────
 $CHARSET = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'.ToCharArray()
 function RndChar { $CHARSET[(Get-Random -Max $CHARSET.Count)] }
-
-# Build 21 green shades (index 0=dark .. 20=bright)
-$SHADES = for ($i=0;$i -le 20;$i++) {
-    $gv = [int](25 + 230*$i/20)
-    $rv = if ($i -gt 16) { 40 } else { 0 }
-    $bv = [int]($gv * 0.25)
-    ansi $rv $gv $bv
-}
 
 function New-Drop($h,$x,$pause=0) {
     $len = [Math]::Max(3,[Math]::Min($h-1, 5+(Get-Random -Max 4)))
@@ -122,16 +167,14 @@ function Step-Stream($st) {
 #endregion
 
 #region ── Compose & render one frame ─────────────────────────────────────────
-# Returns a string buffer for the entire screen (differential in the caller)
-function Compose-Frame($st,$W,$H,$streamH,$logo,$tagline,$inputBuf,$cursorOn,$inputVisible,$shimFrame) {
-    # cells: char + ansi-colour prefix, row-major
+function Compose-Frame($st,$W,$H,$streamH,$logo,$tagline,$inputBuf,$cursorOn,$inputVisible,$shimFrame,$logs) {
     $cells  = [string[]]::new($W*$H)
     $colors = [string[]]::new($W*$H)
     for ($i=0;$i -lt $cells.Count;$i++) { $cells[$i]=' '; $colors[$i]='' }
 
     # 1) matrix rain
     $splashChars  = '*','o','~','.'
-    $splashColors = $C_HEAD,$SHADES[17],$SHADES[11],$SHADES[5]
+    $splashColors = $GLOBAL:C_HEAD,$GLOBAL:SHADES[17],$GLOBAL:SHADES[11],$GLOBAL:SHADES[5]
 
     for ($x=0;$x -lt $st.w;$x++) {
         $d = $st.drops[$x]; if ($null -eq $d -or $d.pause -gt 0) { continue }
@@ -144,12 +187,12 @@ function Compose-Frame($st,$W,$H,$streamH,$logo,$tagline,$inputBuf,$cursorOn,$in
             $i = $y*$W+$x
             $cells[$i] = $st.grid[$x][$y]
             if ($y -eq $d.y -and -not $d.landed) {
-                $colors[$i] = $C_HEAD
+                $colors[$i] = $GLOBAL:C_HEAD
             } else {
                 $dist = $headY - $y
                 $t    = [Math]::Max(0, 1-$dist/[Math]::Max(1,$d.len))
-                $si   = [Math]::Min($SHADES.Count-1,[Math]::Round($t*$t*($SHADES.Count-1)))
-                $colors[$i] = $SHADES[$si]
+                $si   = [Math]::Min($GLOBAL:SHADES.Count-1,[Math]::Round($t*$t*($GLOBAL:SHADES.Count-1)))
+                $colors[$i] = $GLOBAL:SHADES[$si]
             }
         }
         if ($d.landed -and $d.splash -lt $d.splashMax -and $d.floorY -ge 0 -and $d.floorY -lt $streamH) {
@@ -180,7 +223,7 @@ function Compose-Frame($st,$W,$H,$streamH,$logo,$tagline,$inputBuf,$cursorOn,$in
                 $i = ($y0+$r)*$W+$x0+$k
                 if ($i -lt 0 -or $i -ge $cells.Count) { continue }
                 $cells[$i]  = $c
-                $colors[$i] = if ($c -eq [char]0x2588) { $C_BODY } else { $C_SHADE }
+                $colors[$i] = if ($c -eq [char]0x2588) { $GLOBAL:C_BODY } else { $GLOBAL:C_SHADE }
             }
         }
 
@@ -195,15 +238,17 @@ function Compose-Frame($st,$W,$H,$streamH,$logo,$tagline,$inputBuf,$cursorOn,$in
             $i=$tagRow*$W+$tx0+$k
             if ($i -lt 0 -or $i -ge $cells.Count) { continue }
             $cells[$i] = $c
-            # shimmer t
             $dist=[Math]::Abs($k-$center)
             if ($dist -lt $bw) {
                 $t=0.5*(1+[Math]::Cos(($dist/$bw)*[Math]::PI))
-                # map t -> green colour: dark=0 bright=1
-                $gv=[int](92+163*$t); $rv=if($t -gt 0.8){[int](57*($t-0.8)/0.2)}else{0}; $bv=[int](50+86*$t)
+                if ($GLOBAL:CurrentTheme -eq 'phantom') {
+                    $rv=255; $gv=[int](183 + (255-183)*$t); $bv=[int](3 + (255-3)*$t)
+                } else {
+                    $gv=[int](92+163*$t); $rv=if($t -gt 0.8){[int](57*($t-0.8)/0.2)}else{0}; $bv=[int](50+86*$t)
+                }
                 $colors[$i] = ansi $rv $gv $bv $true
             } else {
-                $colors[$i] = $C_TAG
+                $colors[$i] = $GLOBAL:C_TAG
             }
         }
     }
@@ -211,12 +256,11 @@ function Compose-Frame($st,$W,$H,$streamH,$logo,$tagline,$inputBuf,$cursorOn,$in
     # 4) input bar  (3 rows: top rule | prompt | bottom rule)
     if ($inputVisible) {
         $ruleW   = [Math]::Max(1,$W-2)
-        $dashedR = [string]([char]0x254C)*$ruleW   # ╌
+        $dashedR = '-' * $ruleW
         $topY    = $streamH
         $prmY    = $streamH+1
         $botY    = $streamH+2
 
-        # write helper inline
         $writeRow = {
             param($ry,$sx,$txt,$col)
             for ($k=0;$k -lt $txt.Length -and $sx+$k -lt $W;$k++) {
@@ -226,35 +270,45 @@ function Compose-Frame($st,$W,$H,$streamH,$logo,$tagline,$inputBuf,$cursorOn,$in
             }
         }
 
-        & $writeRow $topY 1 $dashedR $C_BORDER
-        & $writeRow $botY 1 $dashedR $C_BORDER
-        & $writeRow $prmY 2 '> ' $C_PROMPT
+        & $writeRow $topY 1 $dashedR $GLOBAL:C_BORDER
+        & $writeRow $botY 1 $dashedR $GLOBAL:C_BORDER
+        & $writeRow $prmY 2 '> ' $GLOBAL:C_PROMPT
 
         $contentX=4
         if ($inputBuf.Length -eq 0) {
             $ph=$PLACEHOLDER.Substring(0,[Math]::Min($PLACEHOLDER.Length,[Math]::Max(0,$W-$contentX-1)))
-            & $writeRow $prmY $contentX $ph $C_HOLDER
-            # cursor at start
+            & $writeRow $prmY $contentX $ph $GLOBAL:C_HOLDER
             $i=$prmY*$W+$contentX
             if ($i -ge 0 -and $i -lt $cells.Count) {
                 $cells[$i]  = if($cursorOn){'█'}else{ if($ph.Length -gt 0){$ph[0]}else{' '} }
-                $colors[$i] = if($cursorOn){$C_CURSOR}else{$C_HOLDER}
+                $colors[$i] = if($cursorOn){$GLOBAL:C_CURSOR}else{$GLOBAL:C_HOLDER}
             }
         } else {
             $maxV=[Math]::Max(1,$W-$contentX-1)
             $vis=$inputBuf.Substring(0,[Math]::Min($inputBuf.Length,$maxV))
-            & $writeRow $prmY $contentX $vis $C_TYPED
-            # cursor at end
+            & $writeRow $prmY $contentX $vis $GLOBAL:C_TYPED
             $curX=$contentX+$vis.Length
             $i=$prmY*$W+$curX
             if ($i -ge 0 -and $i -lt $cells.Count -and $curX -lt $W) {
                 $cells[$i]  = if($cursorOn){'█'}else{' '}
-                $colors[$i] = if($cursorOn){$C_CURSOR}else{$C_TYPED}
+                $colors[$i] = if($cursorOn){$GLOBAL:C_CURSOR}else{$GLOBAL:C_TYPED}
+            }
+        }
+
+        # 5) logs below
+        $outStartY = $streamH + 3
+        $availR = [Math]::Max(0, $H - $outStartY)
+        if ($availR -gt 0 -and $logs.Count -gt 0) {
+            $startIdx = [Math]::Max(0, $logs.Count - $availR)
+            for ($idx = 0; $idx -lt [Math]::Min($availR, $logs.Count - $startIdx); $idx++) {
+                $l = $logs[$startIdx + $idx]
+                $lCol = if ($l.StartsWith('> ')) { $GLOBAL:C_HOLDER } elseif ($l.Contains('[theme]')) { ansi 97 221 170 } else { $GLOBAL:C_TYPED }
+                & $writeRow ($outStartY + $idx) 2 $l.Substring(0, [Math]::Min($l.Length, [Math]::Max(1, $W - 3))) $lCol
             }
         }
     }
 
-    # 5) build output string row by row
+    # 6) build output string row by row
     $sb = [System.Text.StringBuilder]::new($W*$H*20)
     for ($y=0;$y -lt $H;$y++) {
         [void]$sb.Append((pos ($y+1) 1))
@@ -274,7 +328,7 @@ function Compose-Frame($st,$W,$H,$streamH,$logo,$tagline,$inputBuf,$cursorOn,$in
 }
 #endregion
 
-#region ── Disable QuickEdit Mode (prevents clicking from pausing animation) ───
+#region ── Disable QuickEdit Mode ───────────────────────────────────────────────
 try {
     $qeDef = @'
 using System;
@@ -294,8 +348,7 @@ public static class Win32QuickEdit {
         if (h == (IntPtr)(-1)) return 0;
         uint mode = 0;
         if (GetConsoleMode(h, out mode)) {
-            // 0x0040 = ENABLE_QUICK_EDIT_MODE, 0x0080 = ENABLE_EXTENDED_FLAGS
-            uint newMode = (mode & ~0x0040u) | 0x0080u;
+            uint newMode = (mode & ~0x0040u) | 0x0080u | 0x0010u | 0x0200u;
             SetConsoleMode(h, newMode);
         }
         return mode;
@@ -327,7 +380,6 @@ function Start-NeoLoop {
         }
     } catch {}
 
-    # Hide cursor + switch to alternate buffer
     [Console]::Write($ALT_ON + $HIDE + (clr_screen))
 
     $W = [Math]::Max(20,$Host.UI.RawUI.WindowSize.Width-1)
@@ -338,27 +390,23 @@ function Start-NeoLoop {
     $y0     = [Math]::Max(0,[Math]::Floor($H/4 - $logoH/2))
     $tagRow = $y0 + $logoH + 1
 
-    # Rain fills rows 0 .. streamH-1
     $streamH = [Math]::Min([Math]::Max(6,$H-4), $tagRow+1)
-
     $stream = New-Stream $W $streamH
 
-    # Animation timing
     $FPS        = 20
     $frameMs    = 1000/$FPS
     $frame      = 0
     $shimFrame  = 0
     $cursorOn   = $true
     $cursorTick = 0
-    $CURSOR_BLINK_FRAMES = [Math]::Round(530/$frameMs)  # ~11 frames
+    $CURSOR_BLINK_FRAMES = [Math]::Round(530/$frameMs)
 
     $inputBuf     = ''
-    $inputVisible = $false   # shown after STREAM_START_FRAME
-    $STREAM_START  = 15      # ~0.75s before rain + input appear
+    $inputVisible = $false
+    $STREAM_START  = 15
     $logs          = [System.Collections.Generic.List[string]]::new()
 
     $running = $true
-    # Save original console state
     $origTitle = $Host.UI.RawUI.WindowTitle
     $Host.UI.RawUI.WindowTitle = 'NeoLoop'
 
@@ -375,7 +423,6 @@ function Start-NeoLoop {
                 $inputVisible = $true
             }
 
-            # Resize check
             $newW = [Math]::Max(20,$Host.UI.RawUI.WindowSize.Width-1)
             $newH = [Math]::Max(8, $Host.UI.RawUI.WindowSize.Height)
             if ($newW -ne $W -or $newH -ne $H) {
@@ -387,17 +434,39 @@ function Start-NeoLoop {
                 [Console]::Write((clr_screen))
             }
 
-            $frame_str = Compose-Frame $stream $W $H $streamH $logo $tagline $inputBuf $cursorOn $inputVisible $shimFrame
+            $frame_str = Compose-Frame $stream $W $H $streamH $logo $tagline $inputBuf $cursorOn $inputVisible $shimFrame $logs
             [Console]::Write($frame_str)
 
-            # ── keyboard (non-blocking) ──────────────────────────────────────
             while ($true) {
                 try { if (-not [Console]::KeyAvailable) { break } } catch { break }
                 $ki = [Console]::ReadKey($true)
 
-                # Ctrl-C
                 if ($ki.Key -eq 'C' -and ($ki.Modifiers -band [ConsoleModifiers]::Control)) {
+                    if ($inputBuf.Length -gt 0) {
+                        try { Set-Clipboard -Value $inputBuf } catch {}
+                        $logs.Add("[clipboard] Copied input to clipboard")
+                        continue
+                    }
                     $running = $false; break
+                }
+
+                if ($ki.Key -eq 'V' -and ($ki.Modifiers -band [ConsoleModifiers]::Control)) {
+                    try {
+                        $clip = Get-Clipboard -Raw
+                        if ($clip) {
+                            $clean = ($clip -replace "[\r\n]+", " ").Trim()
+                            $inputBuf += $clean
+                        }
+                    } catch {}
+                    continue
+                }
+
+                if ($ki.Key -eq 'X' -and ($ki.Modifiers -band [ConsoleModifiers]::Control)) {
+                    if ($inputBuf.Length -gt 0) {
+                        try { Set-Clipboard -Value $inputBuf } catch {}
+                        $inputBuf = ''
+                    }
+                    continue
                 }
 
                 if (-not $inputVisible) { continue }
@@ -407,7 +476,22 @@ function Start-NeoLoop {
                         $trimmed = $inputBuf.Trim()
                         if ($trimmed) {
                             $logs.Add("> $trimmed")
-                            $logs.Add("[neoloop] processing: `"$trimmed`"")
+                            if ($trimmed.StartsWith('/theme ') -or $trimmed -eq '/theme' -or $trimmed -eq '/themes') {
+                                $tParts = $trimmed.Split(' ', [System.StringSplitOptions]::RemoveEmptyEntries)
+                                if ($tParts.Count -ge 2) {
+                                    $tName = $tParts[1]
+                                    Set-NeoTheme $tName
+                                    $logs.Add("[theme] Switched to `"$GLOBAL:CurrentTheme`"")
+                                } else {
+                                    $logs.Add("[theme] Active: $GLOBAL:CurrentTheme")
+                                    $logs.Add("[theme] Available: phantom, akira, matrix")
+                                    $logs.Add("[theme] Usage: /theme <name>")
+                                }
+                            } elseif ($trimmed -eq '/help') {
+                                $logs.Add("[commands] /theme <name>, /themes, /clear, /help")
+                            } else {
+                                $logs.Add("[neoloop] processing: `"$trimmed`"")
+                            }
                         }
                         $inputBuf = ''
                         break
@@ -424,13 +508,11 @@ function Start-NeoLoop {
                 }
             }
 
-            # ── sleep remainder of frame ─────────────────────────────────────
-            $elapsed = ([DateTime]::UtcNow.Ticks - $t0)/10000   # ms
+            $elapsed = ([DateTime]::UtcNow.Ticks - $t0)/10000
             $sleep   = [Math]::Max(0,$frameMs - $elapsed)
             if ($sleep -gt 0) { Start-Sleep -Milliseconds $sleep }
         }
     } finally {
-        # Restore terminal
         [Console]::Write($ALT_OFF + $SHOW + $RESET)
         $Host.UI.RawUI.WindowTitle = $origTitle
         try {

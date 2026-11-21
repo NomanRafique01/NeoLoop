@@ -4,46 +4,29 @@
  * Renders the post-splash welcome UI: a full-width terminal input bar that
  * appears immediately below the static ANSI banner (logo + tagline).
  *
- * Color palette mirrors splash.ts exactly:
- *   LOGO_BODY    #39ff6a  — borders, prompt ">"
- *   LOGO_SHADING #1f9e47  — placeholder, history echo
- *   TAGLINE      #39FF88  — user-typed text
- *   HEAD         #d7ffe1  — blinking cursor block
+ * Driven by the centralized theme token engine (useTheme hook).
  */
 
 import React, { useEffect, useState } from 'react';
 import { Box, Text, useStdout } from 'ink';
-
-// ---------------------------------------------------------------------------
-// Theme — single source of truth, copied from splash.ts constants
-// ---------------------------------------------------------------------------
-const THEME = {
-  border:      '#39ff6a',  // LOGO_BODY    — top / bottom bar rules
-  prompt:      '#39ff6a',  // LOGO_BODY    — the ">" glyph
-  typed:       '#39FF88',  // TAGLINE      — user-typed text
-  placeholder: '#1f9e47',  // LOGO_SHADING — muted hint
-  cursor:      '#d7ffe1',  // HEAD         — blinking block
-  history:     '#1f9e47',  // LOGO_SHADING — submitted-line echo
-} as const;
-
-const PLACEHOLDER      = 'Type your message or ask NEDLOOP anything...';
-const CURSOR_BLINK_MS  = 530;
+import { useTheme } from '../theme/index.js';
 
 // ---------------------------------------------------------------------------
 // Blinking solid cursor
 // ---------------------------------------------------------------------------
 function BlinkingCursor() {
+  const theme = useTheme();
   const [on, setOn] = useState(true);
 
   useEffect(() => {
-    const id = setInterval(() => setOn(v => !v), CURSOR_BLINK_MS);
+    const id = setInterval(() => setOn(v => !v), 530);
     return () => clearInterval(id);
   }, []);
 
   return (
     <Text
-      backgroundColor={on ? THEME.cursor : undefined}
-      color={on ? '#000000' : THEME.cursor}
+      backgroundColor={on ? theme.cursor : undefined}
+      color={on ? theme.background : theme.cursor}
     >
       {' '}
     </Text>
@@ -51,13 +34,26 @@ function BlinkingCursor() {
 }
 
 // ---------------------------------------------------------------------------
-// History line — dim echo of a submitted command
+// History line — dim echo of a submitted command or log line
 // ---------------------------------------------------------------------------
 function HistoryLine({ text }: { text: string }) {
+  const theme = useTheme();
+  const isCommand = text.startsWith('> ');
+  const isError = text.includes('[error') || text.includes('error:');
+  const isSuccess = text.includes('[theme]') || text.includes('success:');
+  const isWarning = text.includes('[warn') || text.includes('warning:');
+
+  let color = theme.text;
+  if (isCommand) color = theme.textMuted;
+  else if (isError) color = theme.error;
+  else if (isSuccess) color = theme.success;
+  else if (isWarning) color = theme.warning;
+  else color = theme.accent;
+
   return (
     <Box paddingLeft={1}>
-      <Text color={THEME.history} dimColor>
-        {'> '}{text}
+      <Text color={color}>
+        {text}
       </Text>
     </Box>
   );
@@ -70,43 +66,40 @@ interface InputBarProps {
   value:           string;
   showPlaceholder: boolean;
   cols:            number;
+  isSelectedAll?:  boolean;
 }
 
-function InputBar({ value, showPlaceholder, cols }: InputBarProps) {
-  // subtract 2 for the 1-char left + right padding inside the bar
+function InputBar({ value, showPlaceholder, cols, isSelectedAll }: InputBarProps) {
+  const theme = useTheme();
   const ruleWidth = Math.max(1, cols - 2);
-  // '---  ' pattern: longer dashes with wider spacing, works in CMD + PowerShell
   const dashedRule = '-'.repeat(ruleWidth);
+  const placeholder = 'Type your message or ask NEOLOOP anything (try /theme)...';
 
   return (
     <Box flexDirection="column">
-
       {/* ── top dashed border ── */}
       <Box paddingLeft={1} paddingRight={1}>
-        <Text color={THEME.border}>{dashedRule}</Text>
+        <Text color={theme.border}>{dashedRule}</Text>
       </Box>
 
       {/* ── prompt row: > [placeholder OR typed text][cursor] ── */}
       <Box flexDirection="row" paddingLeft={2} paddingRight={1}>
-        <Text color={THEME.prompt} bold>{'> '}</Text>
+        <Text color={theme.accent} bold>{'> '}</Text>
 
         {showPlaceholder ? (
-          /*
-           * Placeholder visible — cursor sits immediately after it.
-           * The moment the user types one character showPlaceholder flips
-           * to false and the placeholder disappears entirely.
-           */
           <>
-            <Text color={THEME.placeholder}>{PLACEHOLDER}</Text>
+            <Text color={theme.inputPlaceholder}>{placeholder}</Text>
             <BlinkingCursor />
           </>
         ) : (
-          /*
-           * User is typing — show typed text in accent color followed by
-           * blinking cursor. No placeholder rendered at all.
-           */
           <>
-            <Text color={THEME.typed}>{value}</Text>
+            {isSelectedAll ? (
+              <Text backgroundColor={theme.selection} color={theme.text} bold>
+                {value}
+              </Text>
+            ) : (
+              <Text color={theme.inputText}>{value}</Text>
+            )}
             <BlinkingCursor />
           </>
         )}
@@ -114,9 +107,8 @@ function InputBar({ value, showPlaceholder, cols }: InputBarProps) {
 
       {/* ── bottom dashed border ── */}
       <Box paddingLeft={1} paddingRight={1}>
-        <Text color={THEME.border}>{dashedRule}</Text>
+        <Text color={theme.border}>{dashedRule}</Text>
       </Box>
-
     </Box>
   );
 }
@@ -125,13 +117,13 @@ function InputBar({ value, showPlaceholder, cols }: InputBarProps) {
 // WelcomeScreen — history list + input bar
 // ---------------------------------------------------------------------------
 export interface WelcomeScreenProps {
-  input:   string;
-  history: string[];
+  input:          string;
+  history:        string[];
+  isSelectedAll?: boolean;
 }
 
-export function WelcomeScreen({ input, history }: WelcomeScreenProps) {
+export function WelcomeScreen({ input, history, isSelectedAll }: WelcomeScreenProps) {
   const { stdout } = useStdout();
-  // useStdout gives us the live stream; cols updates on terminal resize
   const cols = stdout.columns ?? 80;
 
   return (
@@ -144,6 +136,7 @@ export function WelcomeScreen({ input, history }: WelcomeScreenProps) {
         value={input}
         showPlaceholder={input.length === 0}
         cols={cols}
+        isSelectedAll={isSelectedAll}
       />
     </Box>
   );

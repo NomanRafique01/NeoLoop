@@ -4,17 +4,28 @@
  * Renders the NeoLoop ASCII block typography, cyberpunk matrix background
  * simulation, and continuous neon shimmer light sweep using raw ANSI
  * differential updates on the terminal alternate screen buffer.
+ *
+ * Driven by the centralized theme token engine (Phantom, Matrix, etc.)
+ * with live real-time theme morphing via slash commands.
  */
 import { spawnSync } from 'child_process';
+import { copyToClipboard, readFromClipboard } from './clipboard.js';
+import {
+  ThemeTokens,
+  RainPalette,
+  getCurrentTheme,
+  setCurrentTheme,
+  onThemeChange,
+  generateMatrixRainPalette,
+  generateShimmerColor,
+  parseHex,
+  ansiRgb,
+  processSlashCommand,
+} from '../theme/index.js';
 
 // ---------------------------------------------------------------------------
-// Windows QuickEdit guard
+// Windows QuickEdit guard & Console Mode
 // ---------------------------------------------------------------------------
-// On Windows conhost (CMD / PowerShell), clicking the terminal window
-// activates QuickEdit selection mode which blocks ALL stdout writes and
-// freezes the animation until the user presses Escape.  We disable it once
-// at startup via kernel32.SetConsoleMode so clicks never pause us.
-// Works transparently — no-op on non-Windows and Windows Terminal.
 function disableWinQuickEdit(): void {
   if (process.platform !== 'win32') return;
   try {
@@ -30,7 +41,7 @@ function disableWinQuickEdit(): void {
       'IntPtr h=CreateFile("CONIN$",0x80000000u|0x40000000u,1|2,IntPtr.Zero,3,0,IntPtr.Zero);',
       'if(h==(IntPtr)(-1))return;',
       'uint m=0;',
-      'if(GetConsoleMode(h,out m)){SetConsoleMode(h,(m&~0x0040u)|0x0080u);}',
+      'if(GetConsoleMode(h,out m)){SetConsoleMode(h,(m&~0x0040u)|0x0080u|0x0010u|0x0200u);}',
       '}}',
       "'@",
       'Add-Type -TypeDefinition $d -ErrorAction SilentlyContinue',
@@ -51,25 +62,20 @@ export interface SplashOptions {
   title: string;
   tagline?: string;
   hint?: string;
+  theme?: ThemeTokens | string;
   onCommand?: (command: string, log: (text: string) => void) => void | Promise<void>;
   initialLogs?: string[];
 }
 
 // ---------------------------------------------------------------------------
-// Input Bar Layout Constants
+// Animation & Engine Constants
 // ---------------------------------------------------------------------------
-// Number of terminal rows reserved at the very bottom for the input bar.
-// Layout (3 rows):  top-rule | prompt row | bottom-rule
-const INPUT_BAR_ROWS = 3;
-
 const FPS = 20;
-const LOGO_BODY = '#39ff6a';
-const LOGO_SHADING = '#1f9e47';
-const TAGLINE_COLOR = '#39FF88';
-const HINT_ON = '#6fbf8c';
-const HINT_OFF = '#2f6f4a';
 const FULL_REPAINT_MS = 8000;
 const MAX_BACKLOG = 32768;
+const BAR_PLACEHOLDER = 'Type your message or ask NEOLOOP anything (try /theme)...';
+const CURSOR_BLINK_MS = 530;
+const RESET = '\x1b[0m';
 
 // ---------------------------------------------------------------------------
 // Typography: 6-Row Block Font
@@ -105,16 +111,6 @@ export function bigLogo(name: string): string[] | null {
 const CHARSET = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 const randomChar = () => CHARSET[(Math.random() * CHARSET.length) | 0]!;
 const LANE_SPACING = 2;
-const LEVELS = 20;
-
-const hex = (r: number, g: number, b: number) =>
-  '#' + [r, g, b].map(v => Math.round(v).toString(16).padStart(2, '0')).join('');
-
-const SHADES = Array.from({ length: LEVELS + 1 }, (_, i) => {
-  const g = 25 + (230 * i) / LEVELS;
-  return hex(i > LEVELS * 0.8 ? 40 : 0, g, g * 0.25);
-});
-const HEAD = '#d7ffe1';
 
 interface Drop {
   x: number;
@@ -251,13 +247,13 @@ function stepStream(state: StreamState): void {
   }
 }
 
-function composeStream(state: StreamState): void {
+function composeStream(state: StreamState, palette: RainPalette): void {
   const { w, h, drops, grid, chars, colors } = state;
   chars.fill(' ');
   colors.fill('');
 
   const splashChars = ['*', 'o', '~', '.'];
-  const splashColors = [HEAD, SHADES[17]!, SHADES[11]!, SHADES[5]!];
+  const splashColors = palette.splashColors;
 
   for (let x = 0; x < w; x++) {
     const dr = drops[x];
@@ -273,12 +269,15 @@ function composeStream(state: StreamState): void {
       chars[i] = grid[x]![y]!;
 
       if (y === dr.y && !dr.landed) {
-        colors[i] = HEAD;
+        colors[i] = palette.head;
       } else {
         const dist = headY - y;
         const t = Math.max(0, 1 - dist / Math.max(1, dr.len));
-        const shadeIdx = Math.min(SHADES.length - 1, Math.round(t * t * (SHADES.length - 1)));
-        colors[i] = SHADES[shadeIdx]!;
+        const shadeIdx = Math.min(
+          palette.shades.length - 1,
+          Math.round(t * t * (palette.shades.length - 1))
+        );
+        colors[i] = palette.shades[shadeIdx]!;
       }
     }
 
@@ -292,31 +291,6 @@ function composeStream(state: StreamState): void {
 }
 
 // ---------------------------------------------------------------------------
-// Continuous Shimmer Light Sweep Calculations
-// ---------------------------------------------------------------------------
-function lerp(a: number, b: number, t: number): number {
-  return Math.round(a + (b - a) * t);
-}
-
-function hexColor(r: number, g: number, b: number): string {
-  return '#' + [r, g, b].map(v => Math.max(0, Math.min(255, v)).toString(16).padStart(2, '0')).join('');
-}
-
-function getShimmerColor(t: number): string {
-  if (t <= 0) return '#145c32';
-  if (t < 0.55) {
-    const u = t / 0.55;
-    return hexColor(lerp(20, 0, u), lerp(92, 255, u), lerp(50, 102, u));
-  } else if (t < 0.8) {
-    const u = (t - 0.55) / 0.25;
-    return hexColor(lerp(0, 57, u), lerp(255, 255, u), lerp(102, 136, u));
-  } else {
-    const u = (t - 0.8) / 0.2;
-    return hexColor(lerp(57, 180, u), lerp(255, 255, u), lerp(136, 208, u));
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Layout & Terminal Rendering
 // ---------------------------------------------------------------------------
 interface Line {
@@ -325,43 +299,60 @@ interface Line {
 }
 
 const plain = (text: string, color: string): Line => ({ text, colorAt: () => color });
-const blank: Line = plain('', LOGO_SHADING);
 
-function buildLines(title: string, tagline: string, hint: string, hintColor: string, w: number, h: number): Line[] {
+function buildLines(
+  title: string,
+  tagline: string,
+  hint: string,
+  hintColor: string,
+  w: number,
+  h: number,
+  theme: ThemeTokens
+): Line[] {
   const avail = h - 2;
   const fits = (s: string) => s.length > 0 && s.length + 6 <= w;
 
   const big = bigLogo(title);
   if (big && big[0]!.length + 6 <= w && avail >= big.length) {
-    const logo: Line[] = big.map(row => ({ text: row, colorAt: i => (row[i] === '█' ? LOGO_BODY : LOGO_SHADING) }));
+    const logo: Line[] = big.map(row => ({
+      text: row,
+      colorAt: i => (row[i] === '█' ? theme.logo : theme.logoGlow),
+    }));
     const use: Line[] = [];
     const hasSpacing = avail >= logo.length + 1 + (fits(tagline) ? 1 : 0) + (fits(hint) ? 2 : 0);
-    if (fits(tagline)) use.push(plain(tagline, TAGLINE_COLOR));
+    if (fits(tagline)) use.push(plain(tagline, theme.tagline));
     if (fits(hint)) {
-      if (hasSpacing && use.length) use.push(blank);
+      if (hasSpacing && use.length) use.push(plain('', theme.logoGlow));
       use.push(plain(hint, hintColor));
     }
-    return use.length ? [...logo, blank, ...use] : logo;
+    return use.length ? [...logo, plain('', theme.logoGlow), ...use] : logo;
   }
 
   const spaced = title.toUpperCase().split('').join(' ');
   const name = fits(spaced) ? spaced : title.toUpperCase();
-  const lines: Line[] = [plain(name, LOGO_BODY)];
-  if (fits(tagline) && avail >= 3) lines.push(blank, plain(tagline, TAGLINE_COLOR));
-  if (fits(hint) && avail >= lines.length + 2) lines.push(blank, plain(hint, hintColor));
+  const lines: Line[] = [plain(name, theme.logo)];
+  if (fits(tagline) && avail >= 3) lines.push(plain('', theme.logoGlow), plain(tagline, theme.tagline));
+  if (fits(hint) && avail >= lines.length + 2) lines.push(plain('', theme.logoGlow), plain(hint, hintColor));
   return lines;
 }
 
 const sgrCache = new Map<string, string>();
-function sgr(hexCode: string): string {
+function sgr(hexCode: string, theme: ThemeTokens): string {
   let s = sgrCache.get(hexCode);
   if (!s) {
-    const r = parseInt(hexCode.slice(1, 3), 16);
-    const g = parseInt(hexCode.slice(3, 5), 16);
-    const b = parseInt(hexCode.slice(5, 7), 16);
-    const isGlow = (g >= 220 && b >= 90) || hexCode.toLowerCase() === TAGLINE_COLOR.toLowerCase();
-    const boldCode = isGlow ? '1;' : '';
-    s = `\x1b[0;${boldCode}38;2;${r};${g};${b}m`;
+    if (hexCode.startsWith('SEL:')) {
+      const bg = parseHex(theme.selection);
+      const fg = parseHex(theme.text);
+      s = `\x1b[0;1;38;2;${fg.r};${fg.g};${fg.b};48;2;${bg.r};${bg.g};${bg.b}m`;
+    } else {
+      const { r, g, b } = parseHex(hexCode);
+      const isGlow =
+        hexCode.toLowerCase() === theme.accent.toLowerCase() ||
+        hexCode.toLowerCase() === theme.cursor.toLowerCase() ||
+        hexCode.toLowerCase() === theme.shimmer.toLowerCase();
+      const boldCode = isGlow ? '1;' : '';
+      s = `\x1b[0;${boldCode}38;2;${r};${g};${b}m`;
+    }
     sgrCache.set(hexCode, s);
   }
   return s;
@@ -369,31 +360,16 @@ function sgr(hexCode: string): string {
 
 // ---------------------------------------------------------------------------
 // Static Banner — printed on the main buffer after splash exits
-// Anchors the logo in place so Ink renders the input bar directly below it.
 // ---------------------------------------------------------------------------
-
-/** ANSI SGR for a hex color string, inlined to keep this self-contained. */
-function ansiRgb(hex: string, bold = false): string {
-  const r = parseInt(hex.slice(1, 3), 16);
-  const g = parseInt(hex.slice(3, 5), 16);
-  const b = parseInt(hex.slice(5, 7), 16);
-  return `\x1b[${bold ? '1;' : '0;'}38;2;${r};${g};${b}m`;
-}
-const RESET = '\x1b[0m';
-
-/**
- * Print a static ANSI rendering of the logo + tagline directly to stdout on
- * the main screen buffer.  Call this once after runSplash() resolves so the
- * logo stays anchored at the top while Ink renders the input bar below.
- */
 export function printBanner(title: string, tagline: string): void {
   const out = process.stdout;
-  const W   = Math.max(20, (out.columns || 80) - 1);
+  const W = Math.max(20, (out.columns || 80) - 1);
+  const theme = getCurrentTheme();
 
   const big = bigLogo(title);
 
   if (big && big[0]!.length + 6 <= W) {
-    const x0  = Math.max(0, Math.floor((W - big[0]!.length) / 2));
+    const x0 = Math.max(0, Math.floor((W - big[0]!.length) / 2));
     const pad = ' '.repeat(x0);
 
     out.write('\n');
@@ -401,51 +377,48 @@ export function printBanner(title: string, tagline: string): void {
       let line = pad;
       for (let k = 0; k < row.length; k++) {
         const c = row[k]!;
-        if      (c === '█') line += ansiRgb(LOGO_BODY) + c + RESET;
-        else if (c !== ' ') line += ansiRgb(LOGO_SHADING) + c + RESET;
-        else                line += c;
+        if (c === '█') line += ansiRgb(theme.logo) + c + RESET;
+        else if (c !== ' ') line += ansiRgb(theme.logoGlow) + c + RESET;
+        else line += c;
       }
       out.write(line + '\n');
     }
 
-    // tagline centered, bold bright green
+    // tagline centered, bold accent
     const x0_tag = Math.max(0, Math.floor((W - tagline.length) / 2));
-    out.write('\n' + ' '.repeat(x0_tag) + ansiRgb(TAGLINE_COLOR, true) + tagline + RESET + '\n\n');
+    out.write('\n' + ' '.repeat(x0_tag) + ansiRgb(theme.tagline, true) + tagline + RESET + '\n\n');
   } else {
     // narrow terminal fallback
-    out.write('\n' + ansiRgb(LOGO_BODY, true) + title.toUpperCase() + RESET + '\n');
-    out.write(ansiRgb(TAGLINE_COLOR, true) + tagline + RESET + '\n\n');
+    out.write('\n' + ansiRgb(theme.logo, true) + title.toUpperCase() + RESET + '\n');
+    out.write(ansiRgb(theme.tagline, true) + tagline + RESET + '\n\n');
   }
 }
 
 // ---------------------------------------------------------------------------
 // Main Splash Lifecycle
 // ---------------------------------------------------------------------------
-
-// Theme colours shared by the input bar rendered inside the splash
-const BAR_BORDER  = '#39ff6a';   // bright green rule lines
-const BAR_DOTTED  = '#39ff6a';   // proper colour dotted line where rain is ending
-const BAR_PROMPT  = '#39ff6a';   // ">" glyph
-const BAR_TYPED   = '#39FF88';   // typed text
-const BAR_HOLDER  = '#1f9e47';   // placeholder / muted hint
-const BAR_CURSOR  = '#d7ffe1';   // blinking block
-const BAR_PLACEHOLDER = 'Type your message or ask NEOLOOP anything...';
-const CURSOR_BLINK_MS = 530;
-
 export function runSplash({
   title,
   tagline = 'THINK. CODE. EXECUTE.',
   hint = '',
+  theme: initialThemeOverride,
   onCommand,
   initialLogs = [],
 }: SplashOptions): Promise<string> {
   return new Promise(resolve => {
+    if (initialThemeOverride) {
+      setCurrentTheme(initialThemeOverride);
+    }
+
     const out = process.stdout;
     const inp = process.stdin;
 
+    let theme = getCurrentTheme();
+    let rainPalette = generateMatrixRainPalette(theme);
+
     let W = 0;
     let H = 0;
-    let streamH = 0;           // matrix rain only fills rows 0 .. streamH-1
+    let streamH = 0;
     let stream: StreamState | null = null;
     let chars: string[] = [];
     let colors: string[] = [];
@@ -457,19 +430,27 @@ export function runSplash({
     let timer: NodeJS.Timeout | undefined;
 
     // ── input-bar & tool log state ─────────────────────────────────────────
-    let inputVisible  = false;   // only appears AFTER matrix rain starts
-    let inputBuffer   = '';      // characters typed by user
-    let cursorIdx     = 0;       // active cursor position in inputBuffer
-    let cursorOn      = true;    // blinking cursor phase
+    let inputVisible = false;
+    let inputBuffer = '';
+    let cursorIdx = 0;
+    let isSelectedAll = false;
+    let cursorOn = true;
     let cursorTimer: NodeJS.Timeout | undefined;
     const logs: string[] = [...initialLogs];
 
+    // ── Clipboard & Custom Copy Window State ──────────────────────────────
+    let copyWindowOpen = false;
+    let copyWindowX = 0;
+    let copyWindowY = 0;
+    let selectedOptionIdx = 1;
+    let lastCtrlCTime = 0;
+
     const LETTER_FRAMES = 3;
-    const titleDoneFrame  = title.length * LETTER_FRAMES;
-    const tagStartFrame   = titleDoneFrame + 4;
-    const TAG_SPEED       = 2;
-    const tagDoneFrame    = tagStartFrame + Math.ceil(tagline.length / TAG_SPEED);
-    const hintStartFrame  = hint ? tagDoneFrame + 3 : tagDoneFrame;
+    const titleDoneFrame = title.length * LETTER_FRAMES;
+    const tagStartFrame = titleDoneFrame + 4;
+    const TAG_SPEED = 2;
+    const tagDoneFrame = tagStartFrame + Math.ceil(tagline.length / TAG_SPEED);
+    const hintStartFrame = hint ? tagDoneFrame + 3 : tagDoneFrame;
     const streamStartFrame = hint ? hintStartFrame + 3 : tagDoneFrame + 3;
 
     // ── layout helpers ─────────────────────────────────────────────────────
@@ -477,48 +458,164 @@ export function runSplash({
       W = Math.max(20, (out.columns || 80) - 1);
       H = Math.max(8, out.rows || 24);
 
-      const sampleLines = buildLines(title, tagline, hint, HINT_ON, W, H);
+      const sampleLines = buildLines(title, tagline, hint, theme.accent, W, H, theme);
       const y0 = Math.max(0, Math.floor(H / 4 - sampleLines.length / 2));
       const fullBig = bigLogo(title);
       const logoH = fullBig ? fullBig.length : 1;
       const tagRow = y0 + (fullBig ? logoH + 1 : 2);
 
-      // Rain stops at the tagline row (no rain under the tagline or under the logo)
       streamH = Math.min(Math.max(6, H - 4), tagRow + 1);
     }
 
     function init() {
       recalcLayout();
       stream = frame >= streamStartFrame ? createStream(W, streamH) : null;
-      chars  = new Array(W * H).fill(' ');
+      chars = new Array(W * H).fill(' ');
       colors = new Array(W * H).fill('');
-      prevC  = new Array(W * H).fill(null);
-      prevK  = new Array(W * H).fill(null);
+      prevC = new Array(W * H).fill(null);
+      prevK = new Array(W * H).fill(null);
       lastFull = Date.now();
       out.write('\x1b[0m\x1b[2J\x1b[H');
     }
 
+    // Subscribe to live theme changes (e.g. from /theme command)
+    const unsubTheme = onThemeChange((nextTheme) => {
+      theme = nextTheme;
+      rainPalette = generateMatrixRainPalette(theme);
+      sgrCache.clear();
+      prevC.fill(null);
+      prevK.fill(null);
+      lastFull = Date.now();
+    });
+
+    function showToast(_msg: string) {
+      // Disabled toast banner
+    }
+
+    interface MenuAction {
+      id: string;
+      title: string;
+      badge: string;
+      action: () => void | Promise<void>;
+    }
+
+    function getMenuActions(): MenuAction[] {
+      return [
+        {
+          id: 'copy',
+          title: 'Copy',
+          badge: 'Ctrl+C',
+          action: () => {
+            if (inputBuffer) {
+              copyToClipboard(inputBuffer);
+              showToast(`Copied input (${inputBuffer.length} chars)`);
+            } else if (logs.length > 0) {
+              const lastLog = logs[logs.length - 1]!;
+              copyToClipboard(lastLog);
+              showToast('Copied latest log line');
+            } else {
+              showToast('Input bar is empty');
+            }
+            copyWindowOpen = false;
+          },
+        },
+        {
+          id: 'paste',
+          title: 'Paste',
+          badge: 'Ctrl+V',
+          action: async () => {
+            copyWindowOpen = false;
+            try {
+              const pasted = await readFromClipboard();
+              if (pasted) {
+                const clean = pasted.replace(/[\r\n]+/g, ' ');
+                if (isSelectedAll) {
+                  inputBuffer = clean;
+                  cursorIdx = clean.length;
+                  isSelectedAll = false;
+                } else {
+                  inputBuffer = inputBuffer.slice(0, cursorIdx) + clean + inputBuffer.slice(cursorIdx);
+                  cursorIdx += clean.length;
+                }
+                showToast(`Pasted ${clean.length} chars`);
+              } else {
+                showToast('Clipboard is empty');
+              }
+            } catch {
+              showToast('Could not read clipboard');
+            }
+          },
+        },
+        {
+          id: 'selectAll',
+          title: 'Select All',
+          badge: 'Ctrl+A',
+          action: () => {
+            if (inputBuffer.length > 0) {
+              isSelectedAll = true;
+              cursorIdx = inputBuffer.length;
+              showToast(`Selected all (${inputBuffer.length} chars)`);
+            } else {
+              showToast('Input bar is empty');
+            }
+            copyWindowOpen = false;
+          },
+        },
+        {
+          id: 'cut',
+          title: 'Cut',
+          badge: 'Ctrl+X',
+          action: () => {
+            if (inputBuffer) {
+              copyToClipboard(inputBuffer);
+              showToast(`Cut ${inputBuffer.length} chars`);
+              inputBuffer = '';
+              cursorIdx = 0;
+              isSelectedAll = false;
+            } else {
+              showToast('Input bar is empty');
+            }
+            copyWindowOpen = false;
+          },
+        },
+        {
+          id: 'logs',
+          title: 'Copy Terminal Logs',
+          badge: 'Logs',
+          action: () => {
+            if (logs.length > 0) {
+              copyToClipboard(logs.join('\n'));
+              showToast(`Copied ${logs.length} log lines`);
+            } else {
+              showToast('No terminal logs yet');
+            }
+            copyWindowOpen = false;
+          },
+        },
+      ];
+    }
+
     // ── paint the logo + tagline into chars/colors ─────────────────────────
     function paintContent() {
-      const fullLines = buildLines(title, tagline, hint, HINT_ON, W, H);
+      const fullLines = buildLines(title, tagline, hint, theme.accent, W, H, theme);
       const y0 = Math.max(0, Math.floor(H / 4 - fullLines.length / 2));
-      const fullBig  = bigLogo(title);
+      const fullBig = bigLogo(title);
       const fullLogoW = fullBig && fullBig[0] ? fullBig[0].length : title.length;
-      const x0_logo  = Math.max(0, Math.floor((W - fullLogoW) / 2));
+      const x0_logo = Math.max(0, Math.floor((W - fullLogoW) / 2));
 
       const widest = Math.max(...fullLines.map(l => l.text.length));
       const cx0 = Math.max(0, Math.floor((W - widest) / 2) - 3);
       const cx1 = Math.min(W, Math.floor((W + widest) / 2) + 3);
       for (let y = Math.max(0, y0 - 1); y < streamH; y++) {
         for (let x = cx0; x < cx1; x++) {
-          chars[y * W + x]  = ' ';
+          chars[y * W + x] = ' ';
           colors[y * W + x] = '';
         }
       }
 
       const titleLetters = Math.min(title.length, Math.floor(frame / LETTER_FRAMES) + 1);
-      const currentTitle  = title.slice(0, titleLetters);
-      const currentBig    = bigLogo(currentTitle);
+      const currentTitle = title.slice(0, titleLetters);
+      const currentBig = bigLogo(currentTitle);
 
       if (currentBig) {
         currentBig.forEach((row, j) => {
@@ -526,25 +623,25 @@ export function runSplash({
             const c = row[k]!;
             if (c === ' ') continue;
             const idx = (y0 + j) * W + x0_logo + k;
-            chars[idx]  = c;
-            colors[idx] = c === '█' ? LOGO_BODY : LOGO_SHADING;
+            chars[idx] = c;
+            colors[idx] = c === '█' ? theme.logo : theme.logoGlow;
           }
         });
       }
 
       const tagRow = y0 + (currentBig ? currentBig.length + 1 : 2);
       if (tagline && frame >= tagStartFrame) {
-        const tagChars   = Math.min(tagline.length, (frame - tagStartFrame) * TAG_SPEED);
+        const tagChars = Math.min(tagline.length, (frame - tagStartFrame) * TAG_SPEED);
         const currentTag = tagline.slice(0, tagChars);
-        const x0_tag     = Math.max(0, Math.floor((W - tagline.length) / 2));
+        const x0_tag = Math.max(0, Math.floor((W - tagline.length) / 2));
 
         const SWEEP_FRAMES = 24;
-        const beamWidth    = 4.0;
-        const span         = tagline.length + beamWidth;
+        const beamWidth = 4.0;
+        const span = tagline.length + beamWidth;
 
         const isSweeping = frame >= tagDoneFrame;
-        const animFrame  = isSweeping ? (frame - tagDoneFrame) % SWEEP_FRAMES : -1;
-        const center     = isSweeping ? -beamWidth + (animFrame / SWEEP_FRAMES) * span : -999;
+        const animFrame = isSweeping ? (frame - tagDoneFrame) % SWEEP_FRAMES : -1;
+        const center = isSweeping ? -beamWidth + (animFrame / SWEEP_FRAMES) * span : -999;
 
         for (let k = 0; k < currentTag.length; k++) {
           const c = currentTag[k]!;
@@ -561,24 +658,24 @@ export function runSplash({
                 if (t > maxT) maxT = t;
               }
             }
-            colors[idx] = getShimmerColor(maxT);
+            colors[idx] = generateShimmerColor(theme, maxT);
           } else {
-            colors[idx] = '#145c32';
+            colors[idx] = theme.tagline;
           }
         }
       }
 
       const hasSpacing = H - 2 >= (currentBig ? currentBig.length : 1) + 1 + (tagline ? 1 : 0) + (hint ? 2 : 0);
-      const hintRow    = tagRow + (tagline ? (hasSpacing ? 2 : 1) : 1);
+      const hintRow = tagRow + (tagline ? (hasSpacing ? 2 : 1) : 1);
       if (hint && frame >= hintStartFrame) {
-        const x0_hint  = Math.max(0, Math.floor((W - hint.length) / 2));
-        const hintColor = (frame >> 3) & 1 ? HINT_ON : HINT_OFF;
+        const x0_hint = Math.max(0, Math.floor((W - hint.length) / 2));
+        const hintColor = (frame >> 3) & 1 ? theme.accent : theme.textMuted;
 
         for (let k = 0; k < hint.length; k++) {
           const c = hint[k]!;
           if (c === ' ') continue;
           const idx = hintRow * W + x0_hint + k;
-          chars[idx]  = c;
+          chars[idx] = c;
           colors[idx] = hintColor;
         }
       }
@@ -589,74 +686,233 @@ export function runSplash({
       if (!inputVisible) return;
 
       const ruleWidth = Math.max(1, W - 2);
-      // '---  ' pattern: longer dashes with wider spacing, works in CMD + PowerShell
       const dashedRule = '-'.repeat(ruleWidth);
 
-      // helper: write a string into chars/colors at a given row
       const writeRow = (y: number, startX: number, text: string, color: string) => {
         if (y < 0 || y >= H) return;
         for (let k = 0; k < text.length && startX + k < W; k++) {
-          chars[y * W + startX + k]  = text[k]!;
+          chars[y * W + startX + k] = text[k]!;
           colors[y * W + startX + k] = color;
         }
       };
 
       // 1) Top dashed border line
       const topY = streamH;
-      writeRow(topY, 1, dashedRule, BAR_BORDER);
+      writeRow(topY, 1, dashedRule, theme.border);
 
       // 2) Prompt row:  "> " then placeholder/text then cursor
       const promptY = streamH + 1;
-      writeRow(promptY, 2, '> ', BAR_PROMPT);
-      const contentX = 4;  // column after "> "
+      writeRow(promptY, 2, '> ', theme.accent);
+      const contentX = 4;
 
       if (inputBuffer.length === 0) {
-        // placeholder + cursor at start
-        const ph = BAR_PLACEHOLDER.slice(0, Math.max(0, W - contentX - 1));
-        writeRow(promptY, contentX, ph, BAR_HOLDER);
-        // cursor at start of placeholder
+        const maxPhLen = Math.max(0, W - contentX - 2);
+        const ph = BAR_PLACEHOLDER.slice(0, maxPhLen);
+        writeRow(promptY, contentX, ph, theme.inputPlaceholder);
         const curX = contentX;
         if (curX < W) {
-          chars[promptY * W + curX]  = cursorOn ? '█' : (ph[0] || ' ');
-          colors[promptY * W + curX] = cursorOn ? BAR_CURSOR : BAR_HOLDER;
+          chars[promptY * W + curX] = cursorOn ? '█' : (ph[0] || ' ');
+          colors[promptY * W + curX] = cursorOn ? theme.cursor : theme.inputPlaceholder;
         }
       } else {
-        // typed text + cursor navigation
-        const maxVisible = Math.max(1, W - contentX - 1);
+        const maxVisible = Math.max(1, W - contentX - 2);
         let viewOffset = 0;
         if (cursorIdx >= maxVisible) {
           viewOffset = cursorIdx - maxVisible + 1;
         }
         const visible = inputBuffer.slice(viewOffset, viewOffset + maxVisible);
-        writeRow(promptY, contentX, visible, BAR_TYPED);
 
-        const curX = contentX + (cursorIdx - viewOffset);
-        if (curX < W && curX >= contentX) {
-          const charUnder = (cursorIdx - viewOffset < visible.length)
-            ? visible[cursorIdx - viewOffset]!
-            : ' ';
-          chars[promptY * W + curX]  = (charUnder === ' ' && cursorOn) ? '█' : charUnder;
-          colors[promptY * W + curX] = cursorOn ? BAR_CURSOR : BAR_TYPED;
+        if (isSelectedAll) {
+          for (let k = 0; k < visible.length; k++) {
+            const posX = contentX + k;
+            if (posX < W) {
+              const idx = promptY * W + posX;
+              chars[idx] = visible[k]!;
+              colors[idx] = `SEL:${theme.selection}`;
+            }
+          }
+          const curX = contentX + (cursorIdx - viewOffset);
+          if (curX < W && curX >= contentX && curX === contentX + visible.length) {
+            chars[promptY * W + curX] = cursorOn ? '█' : ' ';
+            colors[promptY * W + curX] = cursorOn ? theme.cursor : '';
+          }
+        } else {
+          writeRow(promptY, contentX, visible, theme.inputText);
+
+          const curX = contentX + (cursorIdx - viewOffset);
+          if (curX < W && curX >= contentX) {
+            const charUnder = (cursorIdx - viewOffset < visible.length)
+              ? visible[cursorIdx - viewOffset]!
+              : ' ';
+            chars[promptY * W + curX] = (charUnder === ' ' && cursorOn) ? '█' : charUnder;
+            colors[promptY * W + curX] = cursorOn ? theme.cursor : theme.inputText;
+          }
         }
       }
 
       // 3) Bottom dashed rule
       const botY = streamH + 2;
-      writeRow(botY, 1, dashedRule, BAR_BORDER);
+      writeRow(botY, 1, dashedRule, theme.border);
 
       // 4) Tool logs / execution history scrolling down below the input bar
       const outputStartY = streamH + 3;
       const availableRows = Math.max(0, H - outputStartY);
 
       if (availableRows > 0 && logs.length > 0) {
-        // Show the latest availableRows lines so output scrolls down as tool proceeds
         const visibleLogs = logs.slice(-availableRows);
         visibleLogs.forEach((logLine, idx) => {
           const rowY = outputStartY + idx;
           const isHistoryCmd = logLine.startsWith('> ');
-          const logColor = isHistoryCmd ? '#1f9e47' : '#39FF88';
+          const isError = logLine.includes('[error') || logLine.includes('error:');
+          const isSuccess = logLine.includes('[theme]') || logLine.includes('success:');
+          const isWarning = logLine.includes('[warn') || logLine.includes('warning:');
+          let logColor = theme.inputText;
+          if (isHistoryCmd) logColor = theme.textMuted;
+          else if (isError) logColor = theme.error;
+          else if (isSuccess) logColor = theme.success;
+          else if (isWarning) logColor = theme.warning;
+          else logColor = theme.accent;
           writeRow(rowY, 2, logLine.slice(0, W - 3), logColor);
         });
+      }
+    }
+
+    // ── paint custom copy / paste window ───────────────────────────────────
+    function paintCopyWindow() {
+      const actions = getMenuActions();
+      const winW = 31;
+      const winH = actions.length + 2;
+      const innerW = winW - 2;
+
+      const winX0 = Math.max(2, Math.min(W - winW - 2, copyWindowX));
+      const winY0 = Math.max(streamH + 3, copyWindowY);
+
+      const setCell = (y: number, x: number, ch: string, col: string) => {
+        if (y >= 0 && y < H && x >= 0 && x < W) {
+          const idx = y * W + x;
+          chars[idx] = ch;
+          colors[idx] = col;
+        }
+      };
+
+      const writeStr = (y: number, startX: number, text: string, col: string) => {
+        for (let k = 0; k < text.length && startX + k < W; k++) {
+          setCell(y, startX + k, text[k]!, col);
+        }
+      };
+
+      // Clear window interior
+      for (let y = winY0; y < winY0 + winH; y++) {
+        for (let x = winX0; x < winX0 + winW; x++) {
+          setCell(y, x, ' ', theme.surface);
+        }
+      }
+
+      // Top border: ┌─ CLIPBOARD ─────────────────┐
+      const titleTag = ' CLIPBOARD ';
+      const rightDashes = innerW - 1 - titleTag.length;
+      const topBorder = '┌─' + titleTag + '─'.repeat(Math.max(0, rightDashes)) + '┐';
+      writeStr(winY0, winX0, topBorder, theme.border);
+      writeStr(winY0, winX0 + 2, titleTag, theme.accent);
+
+      // Menu items
+      actions.forEach((act, idx) => {
+        const isSelected = idx === selectedOptionIdx;
+        const y = winY0 + 1 + idx;
+        const prefix = isSelected ? ` > ${act.title}` : `   ${act.title}`;
+        const badge = act.badge;
+        const padding = Math.max(1, innerW - prefix.length - badge.length - 1);
+        const rowStr = '│' + prefix + ' '.repeat(padding) + badge + ' │';
+
+        writeStr(y, winX0, rowStr, theme.border);
+        writeStr(y, winX0 + 1, prefix, isSelected ? theme.accent : theme.text);
+        writeStr(y, winX0 + winW - 2 - badge.length, badge, isSelected ? theme.accent : theme.textMuted);
+      });
+
+      // Bottom border: └─────────────────────────────┘
+      const botBorder = '└' + '─'.repeat(innerW) + '┘';
+      writeStr(winY0 + winH - 1, winX0, botBorder, theme.border);
+    }
+
+    // ── mouse event handler ───────────────────────────────────────────────
+    function handleMouseEvent(b: number, col: number, row: number, isPress: boolean, isRelease: boolean) {
+      const btn = b & 3;
+      const isLeft = btn === 0;
+      const isRight = btn === 2;
+      const isMotion = (b & 32) !== 0;
+      const isWheelUp = b === 64;
+      const isWheelDown = b === 65;
+
+      const actions = getMenuActions();
+      const winW = 31;
+      const winH = actions.length + 2;
+      const winX0 = Math.max(2, Math.min(W - winW - 2, copyWindowX));
+      const winY0 = Math.max(streamH + 3, copyWindowY);
+
+      if (copyWindowOpen && (isWheelUp || isWheelDown)) {
+        if (isWheelUp) {
+          selectedOptionIdx = (selectedOptionIdx - 1 + actions.length) % actions.length;
+        } else {
+          selectedOptionIdx = (selectedOptionIdx + 1) % actions.length;
+        }
+        return;
+      }
+
+      if (copyWindowOpen) {
+        if (isMotion) {
+          if (col >= winX0 && col < winX0 + winW && row > winY0 && row < winY0 + winH - 1) {
+            const optIdx = row - (winY0 + 1);
+            if (optIdx >= 0 && optIdx < actions.length) {
+              selectedOptionIdx = optIdx;
+            }
+          }
+          return;
+        }
+
+        if (isLeft && isPress) {
+          if (col >= winX0 && col < winX0 + winW && row >= winY0 && row < winY0 + winH) {
+            const optIdx = row - (winY0 + 1);
+            if (optIdx >= 0 && optIdx < actions.length) {
+              actions[optIdx]!.action();
+              return;
+            }
+            return;
+          }
+          copyWindowOpen = false;
+        }
+      }
+
+      const topY = streamH;
+      const promptY = streamH + 1;
+      const botY = streamH + 2;
+
+      if (isRight && isPress) {
+        if (row >= topY && row <= botY) {
+          copyWindowX = Math.max(2, Math.min(W - winW - 2, col - 2));
+          copyWindowY = streamH + 3;
+          copyWindowOpen = true;
+          selectedOptionIdx = inputBuffer ? 0 : 1;
+          return;
+        } else {
+          if (copyWindowOpen) {
+            copyWindowOpen = false;
+          }
+          return;
+        }
+      }
+
+      if (isLeft && isPress) {
+        if (row >= topY && row <= botY) {
+          const contentX = 4;
+          if (row === promptY && col >= contentX) {
+            cursorIdx = Math.max(0, Math.min(inputBuffer.length, col - contentX));
+            isSelectedAll = false;
+          }
+          if (copyWindowOpen) {
+            copyWindowOpen = false;
+          }
+          return;
+        }
       }
     }
 
@@ -680,7 +936,7 @@ export function runSplash({
           let last = '';
           for (let k = x; k <= end; k++) {
             const key = colors[base + k]!;
-            if (key !== last) { s += key ? sgr(key) : '\x1b[0m'; last = key; }
+            if (key !== last) { s += key ? sgr(key, theme) : '\x1b[0m'; last = key; }
             s += chars[base + k];
           }
           x = end + 1;
@@ -695,12 +951,12 @@ export function runSplash({
       colors.fill('');
 
       if (stream) {
-        composeStream(stream);
+        composeStream(stream, rainPalette);
         for (let y = 0; y < stream.h; y++) {
           for (let x = 0; x < stream.w; x++) {
             const source = y * stream.w + x;
             const target = y * W + x;
-            chars[target]  = stream.chars[source]!;
+            chars[target] = stream.chars[source]!;
             colors[target] = stream.colors[source]!;
           }
         }
@@ -708,6 +964,10 @@ export function runSplash({
 
       paintContent();
       paintInputBar();
+
+      if (copyWindowOpen) {
+        paintCopyWindow();
+      }
 
       if (Date.now() - lastFull > FULL_REPAINT_MS) {
         prevC.fill(null);
@@ -724,86 +984,304 @@ export function runSplash({
     function cleanup() {
       if (!running) return;
       running = false;
+      unsubTheme();
       if (timer) clearTimeout(timer);
       if (cursorTimer) clearInterval(cursorTimer);
       out.off('resize', init);
       inp.off('data', onData);
       process.off('exit', cleanup);
-      out.write('\x1b[?1000l\x1b[0m\x1b[?25h\x1b[?1049l');
+      out.write('\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[0m\x1b[?25h\x1b[?1049l');
       try { inp.setRawMode(false); } catch { /* ignore */ }
       inp.pause();
     }
 
-    // ── keyboard handler ───────────────────────────────────────────────────
+    // ── keyboard & mouse data dispatcher ───────────────────────────────────
     function onData(buf: Buffer) {
       const s = buf.toString();
 
-      // Ctrl-C — always exits cleanly
-      if (s === '\x03') {
+      let match: RegExpExecArray | null;
+      const sgrRegex = /\x1b\[<(\d+);(\d+);(\d+)([Mm])/g;
+      let mouseHandled = false;
+
+      while ((match = sgrRegex.exec(s)) !== null) {
+        mouseHandled = true;
+        const b = parseInt(match[1]!, 10);
+        const col = parseInt(match[2]!, 10) - 1;
+        const row = parseInt(match[3]!, 10) - 1;
+        const isRelease = match[4] === 'm';
+        const isPress = match[4] === 'M';
+        handleMouseEvent(b, col, row, isPress, isRelease);
+      }
+
+      const x10Regex = /\x1b\[M([\s\S]{3})/g;
+      while ((match = x10Regex.exec(s)) !== null) {
+        mouseHandled = true;
+        const b3 = match[1]!;
+        const b = b3.charCodeAt(0) - 32;
+        const col = b3.charCodeAt(1) - 32 - 1;
+        const row = b3.charCodeAt(2) - 32 - 1;
+        const isRelease = (b & 3) === 3;
+        const isPress = !isRelease;
+        handleMouseEvent(b, col, row, isPress, isRelease);
+      }
+
+      const remaining = s.replace(sgrRegex, '').replace(x10Regex, '');
+      if (!remaining && mouseHandled) {
+        return;
+      }
+
+      const keyInput = remaining || s;
+
+      // Ctrl-C
+      if (keyInput === '\x03' || (buf.length === 1 && buf[0] === 3)) {
+        if (copyWindowOpen) {
+          copyWindowOpen = false;
+          return;
+        }
+        if (isSelectedAll && inputBuffer) {
+          copyToClipboard(inputBuffer);
+          showToast(`Copied selection (${inputBuffer.length} chars)`);
+          return;
+        }
+        if (inputBuffer) {
+          copyToClipboard(inputBuffer);
+          const now = Date.now();
+          if (now - lastCtrlCTime < 1500) {
+            cleanup();
+            process.exit(0);
+          }
+          lastCtrlCTime = now;
+          showToast('Copied input! (Press Ctrl+C again to exit)');
+          return;
+        }
         cleanup();
         process.exit(0);
       }
 
-      // Input bar only accepts interaction once the rain animation has started
+      if (copyWindowOpen) {
+        const actions = getMenuActions();
+
+        if (keyInput === '\x1b[A' || keyInput === '\x1bOA') {
+          selectedOptionIdx = (selectedOptionIdx - 1 + actions.length) % actions.length;
+          return;
+        }
+        if (keyInput === '\x1b[B' || keyInput === '\x1bOB') {
+          selectedOptionIdx = (selectedOptionIdx + 1) % actions.length;
+          return;
+        }
+        if (keyInput === '\r' || keyInput === '\n' || keyInput === ' ') {
+          actions[selectedOptionIdx]!.action();
+          return;
+        }
+        if (/^[1-5]$/.test(keyInput)) {
+          const idx = parseInt(keyInput, 10) - 1;
+          if (actions[idx]) actions[idx]!.action();
+          return;
+        }
+        if (keyInput === 'c' || keyInput === 'C') {
+          actions[0]!.action();
+          return;
+        }
+        if (keyInput === 'v' || keyInput === 'V') {
+          actions[1]!.action();
+          return;
+        }
+        if (keyInput === 'a' || keyInput === 'A') {
+          actions[2]!.action();
+          return;
+        }
+        if (keyInput === 'x' || keyInput === 'X') {
+          actions[3]!.action();
+          return;
+        }
+        if (keyInput === 'l' || keyInput === 'L') {
+          actions[4]!.action();
+          return;
+        }
+        if (keyInput === '\x1b') {
+          copyWindowOpen = false;
+          return;
+        }
+        return;
+      }
+
+      // Ctrl+A (Select All)
+      if (keyInput === '\x01' || (buf.length === 1 && buf[0] === 1)) {
+        if (copyWindowOpen) {
+          copyWindowOpen = false;
+        }
+        if (inputBuffer.length > 0) {
+          isSelectedAll = true;
+          cursorIdx = inputBuffer.length;
+          showToast(`Selected all (${inputBuffer.length} chars)`);
+        } else {
+          showToast('Input bar is empty');
+        }
+        return;
+      }
+
+      // Ctrl+V (Paste) or Shift+Insert
+      if (keyInput === '\x16' || (buf.length === 1 && buf[0] === 22) || keyInput === '\x1b[2~') {
+        readFromClipboard().then(pasted => {
+          if (pasted) {
+            const clean = pasted.replace(/[\r\n]+/g, ' ');
+            if (isSelectedAll) {
+              inputBuffer = clean;
+              cursorIdx = clean.length;
+              isSelectedAll = false;
+            } else {
+              inputBuffer = inputBuffer.slice(0, cursorIdx) + clean + inputBuffer.slice(cursorIdx);
+              cursorIdx += clean.length;
+            }
+            showToast(`Pasted ${clean.length} chars`);
+          } else {
+            showToast('Clipboard is empty');
+          }
+        }).catch(() => {
+          showToast('Could not read clipboard');
+        });
+        return;
+      }
+
+      // Bracketed Paste Mode
+      if (keyInput.includes('\x1b[200~')) {
+        const bpMatch = /\x1b\[200~([\s\S]*?)\x1b\[201~/.exec(keyInput);
+        if (bpMatch) {
+          const clean = bpMatch[1]!.replace(/[\r\n]+/g, ' ');
+          if (isSelectedAll) {
+            inputBuffer = clean;
+            cursorIdx = clean.length;
+            isSelectedAll = false;
+          } else {
+            inputBuffer = inputBuffer.slice(0, cursorIdx) + clean + inputBuffer.slice(cursorIdx);
+            cursorIdx += clean.length;
+          }
+          showToast(`Pasted ${clean.length} chars`);
+          return;
+        }
+      }
+
+      // Ctrl+X (Cut)
+      if (keyInput === '\x18' || (buf.length === 1 && buf[0] === 24)) {
+        if (inputBuffer) {
+          copyToClipboard(inputBuffer);
+          showToast(`Cut ${inputBuffer.length} chars`);
+          inputBuffer = '';
+          cursorIdx = 0;
+          isSelectedAll = false;
+        } else {
+          showToast('Input bar is empty');
+        }
+        return;
+      }
+
+      // F2 or Alt+C toggles Custom Copy Window
+      if (keyInput === '\x1bOQ' || keyInput === '\x1b[12~' || keyInput === '\x1b[OQ' || keyInput === '\x1bc') {
+        const winW = 31;
+        copyWindowX = Math.max(2, Math.floor((W - winW) / 2));
+        copyWindowY = streamH + 3;
+        copyWindowOpen = !copyWindowOpen;
+        selectedOptionIdx = inputBuffer ? 0 : 1;
+        return;
+      }
+
+      // Escape key clears selection or input bar
+      if (keyInput === '\x1b') {
+        if (isSelectedAll) {
+          isSelectedAll = false;
+          showToast('Selection cleared');
+          return;
+        }
+        if (inputBuffer) {
+          inputBuffer = '';
+          cursorIdx = 0;
+          showToast('Input bar cleared');
+        }
+        return;
+      }
+
       if (!inputVisible) {
         return;
       }
 
-      // ── Cursor navigation (never stops or pauses animation) ─────────────
-      if (s === '\x1b[D' || s === '\x1bOD') {
+      // ── Cursor navigation ───────────────────────────────────────────────
+      if (keyInput === '\x1b[D' || keyInput === '\x1bOD') {
+        isSelectedAll = false;
         cursorIdx = Math.max(0, cursorIdx - 1);
         return;
       }
-      if (s === '\x1b[C' || s === '\x1bOC') {
+      if (keyInput === '\x1b[C' || keyInput === '\x1bOC') {
+        isSelectedAll = false;
         cursorIdx = Math.min(inputBuffer.length, cursorIdx + 1);
         return;
       }
-      if (s === '\x1b[H' || s === '\x1b[1~' || s === '\x1b[7~') {
+      if (keyInput === '\x1b[H' || keyInput === '\x1b[1~' || keyInput === '\x1b[7~') {
+        isSelectedAll = false;
         cursorIdx = 0;
         return;
       }
-      if (s === '\x1b[F' || s === '\x1b[4~' || s === '\x1b[8~') {
+      if (keyInput === '\x1b[F' || keyInput === '\x1b[4~' || keyInput === '\x1b[8~') {
+        isSelectedAll = false;
         cursorIdx = inputBuffer.length;
         return;
       }
-      if (s === '\x1b[3~') {
-        // Delete key
+      if (keyInput === '\x1b[3~') {
+        if (isSelectedAll) {
+          inputBuffer = '';
+          cursorIdx = 0;
+          isSelectedAll = false;
+          return;
+        }
         if (cursorIdx < inputBuffer.length) {
           inputBuffer = inputBuffer.slice(0, cursorIdx) + inputBuffer.slice(cursorIdx + 1);
         }
         return;
       }
 
-      // Safely ignore all other escape / mouse / focus codes
-      if (s.startsWith('\x1b')) return;
+      if (keyInput.startsWith('\x1b')) return;
 
-      // ── Enter: submit command (splash stays anchored & continuously animated)
-      if (s === '\r' || s === '\n') {
+      // ── Enter: submit command ───────────────────────────────────────────
+      if (keyInput === '\r' || keyInput === '\n') {
+        isSelectedAll = false;
         const trimmed = inputBuffer.trim();
         if (trimmed) {
           logs.push('> ' + trimmed);
           const cmd = trimmed;
           inputBuffer = '';
           cursorIdx = 0;
-          if (onCommand) {
-            try {
-              Promise.resolve(onCommand(cmd, (msg: string) => {
-                logs.push(msg);
-              })).catch(err => {
+
+          // Dispatch slash commands (/theme, /themes, /help)
+          const isSlash = processSlashCommand(cmd, (msg: string) => {
+            logs.push(msg);
+          });
+
+          if (!isSlash) {
+            if (onCommand) {
+              try {
+                Promise.resolve(onCommand(cmd, (msg: string) => {
+                  logs.push(msg);
+                })).catch(err => {
+                  logs.push(`[error] ${err?.message || err}`);
+                });
+              } catch (err: any) {
                 logs.push(`[error] ${err?.message || err}`);
-              });
-            } catch (err: any) {
-              logs.push(`[error] ${err?.message || err}`);
+              }
+            } else {
+              logs.push(`[neoloop] processing: "${cmd}"`);
             }
-          } else {
-            logs.push(`[neoloop] processing: "${cmd}"`);
           }
         }
         return;
       }
 
-      // ── Backspace (raw mode sends \x7f or \x08) ─────────────────────────
-      if (s === '\x7f' || s === '\x08') {
+      // ── Backspace ───────────────────────────────────────────────────────
+      if (keyInput === '\x7f' || keyInput === '\x08') {
+        if (isSelectedAll) {
+          inputBuffer = '';
+          cursorIdx = 0;
+          isSelectedAll = false;
+          return;
+        }
         if (cursorIdx > 0) {
           inputBuffer = inputBuffer.slice(0, cursorIdx - 1) + inputBuffer.slice(cursorIdx);
           cursorIdx--;
@@ -811,31 +1289,31 @@ export function runSplash({
         return;
       }
 
-      // ── Printable characters: insert at active cursor position ──────────
-      // Typing never interrupts or pauses the animation at any cost!
-      const printable = s.replace(/[\x00-\x1f\x7f]/g, '');
+      // ── Printable characters ────────────────────────────────────────────
+      const printable = keyInput.replace(/[\x00-\x1f\x7f]/g, '');
       if (printable) {
-        inputBuffer = inputBuffer.slice(0, cursorIdx) + printable + inputBuffer.slice(cursorIdx);
-        cursorIdx += printable.length;
+        if (isSelectedAll) {
+          inputBuffer = printable;
+          cursorIdx = printable.length;
+          isSelectedAll = false;
+        } else {
+          inputBuffer = inputBuffer.slice(0, cursorIdx) + printable + inputBuffer.slice(cursorIdx);
+          cursorIdx += printable.length;
+        }
       }
     }
 
     // ── boot ───────────────────────────────────────────────────────────────
     disableWinQuickEdit();
-    // Force UTF-8 output so box-drawing characters render correctly in both
-    // CMD and PowerShell (PowerShell defaults to the system OEM code page).
-    out.write('\x1b%G');   // ESC % G  — switch terminal to UTF-8 mode
-    out.write('\x1b[?1049h\x1b[?25l\x1b[?1000h');
+    out.write('\x1b%G');
+    out.write('\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1002h\x1b[?1006h');
     init();
     out.on('resize', init);
     process.on('exit', cleanup);
-    // PowerShell may report isTTY as undefined even on a real console handle;
-    // attempt setRawMode regardless and silently ignore if the handle refuses.
-    try { inp.setRawMode(true); } catch { /* non-TTY pipe — input still works */ }
+    try { inp.setRawMode(true); } catch { /* non-TTY pipe */ }
     inp.resume();
     inp.on('data', onData);
 
-    // cursor blink timer — independent of the render loop
     cursorTimer = setInterval(() => { cursorOn = !cursorOn; }, CURSOR_BLINK_MS);
 
     (function loop() {
@@ -849,7 +1327,6 @@ export function runSplash({
         }
         stepStream(stream);
 
-        // Input bar appears only when the first rain column hits bottom / splashes
         if (stream.hasHitBottom) {
           inputVisible = true;
         }
