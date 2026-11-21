@@ -1,4 +1,4 @@
-# NeoLoop CLI - PowerShell Edition
+﻿# NeoLoop CLI - PowerShell Edition
 # Same interface as the CMD/Node version: matrix rain + big ASCII logo + input bar
 
 #region ── ANSI helpers ────────────────────────────────────────────────────────
@@ -274,10 +274,55 @@ function Compose-Frame($st,$W,$H,$streamH,$logo,$tagline,$inputBuf,$cursorOn,$in
 }
 #endregion
 
+#region ── Disable QuickEdit Mode (prevents clicking from pausing animation) ───
+try {
+    $qeDef = @'
+using System;
+using System.Runtime.InteropServices;
+public static class Win32QuickEdit {
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern IntPtr GetStdHandle(int nStdHandle);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool GetConsoleMode(IntPtr hConsoleHandle, out uint lpMode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
+
+    public static uint Disable() {
+        IntPtr h = GetStdHandle(-10); // STD_INPUT_HANDLE
+        uint mode = 0;
+        if (GetConsoleMode(h, out mode)) {
+            // 0x0040 = ENABLE_QUICK_EDIT_MODE, 0x0080 = ENABLE_EXTENDED_FLAGS
+            uint newMode = (mode & ~0x0040u) | 0x0080u;
+            SetConsoleMode(h, newMode);
+        }
+        return mode;
+    }
+
+    public static void Restore(uint mode) {
+        if (mode != 0) {
+            IntPtr h = GetStdHandle(-10);
+            SetConsoleMode(h, mode | 0x0080u);
+        }
+    }
+}
+'@
+    Add-Type -TypeDefinition $qeDef -ErrorAction SilentlyContinue
+} catch {}
+#endregion
+
 #region ── Main loop ───────────────────────────────────────────────────────────
 function Start-NeoLoop {
     $title   = 'NEOLOOP'
     $tagline = 'THINK. CODE. EXECUTE.'
+
+    $origConsoleMode = 0
+    try {
+        if ([Win32QuickEdit]) {
+            $origConsoleMode = [Win32QuickEdit]::Disable()
+        }
+    } catch {}
 
     # Hide cursor + switch to alternate buffer
     [Console]::Write($ALT_ON + $HIDE + (clr_screen))
@@ -385,6 +430,11 @@ function Start-NeoLoop {
         # Restore terminal
         [Console]::Write($ALT_OFF + $SHOW + $RESET)
         $Host.UI.RawUI.WindowTitle = $origTitle
+        try {
+            if ([Win32QuickEdit] -and $origConsoleMode) {
+                [Win32QuickEdit]::Restore($origConsoleMode)
+            }
+        } catch {}
     }
 }
 

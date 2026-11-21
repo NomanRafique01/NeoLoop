@@ -5,6 +5,44 @@
  * simulation, and continuous neon shimmer light sweep using raw ANSI
  * differential updates on the terminal alternate screen buffer.
  */
+import { spawnSync } from 'child_process';
+
+// ---------------------------------------------------------------------------
+// Windows QuickEdit guard
+// ---------------------------------------------------------------------------
+// On Windows conhost (CMD / PowerShell), clicking the terminal window
+// activates QuickEdit selection mode which blocks ALL stdout writes and
+// freezes the animation until the user presses Escape.  We disable it once
+// at startup via kernel32.SetConsoleMode so clicks never pause us.
+// Works transparently — no-op on non-Windows and Windows Terminal.
+function disableWinQuickEdit(): void {
+  if (process.platform !== 'win32') return;
+  try {
+    const psScript = [
+      "$d=@'",
+      'using System;using System.Runtime.InteropServices;',
+      'public static class _QE{',
+      '[DllImport("kernel32.dll")]public static extern IntPtr GetStdHandle(int n);',
+      '[DllImport("kernel32.dll")]public static extern bool GetConsoleMode(IntPtr h,out uint m);',
+      '[DllImport("kernel32.dll")]public static extern bool SetConsoleMode(IntPtr h,uint m);',
+      'public static void Disable(){',
+      'IntPtr h=GetStdHandle(-10);uint m=0;',
+      'if(GetConsoleMode(h,out m)){SetConsoleMode(h,(m&~0x0040u)|0x0080u);}',
+      '}}',
+      "'@",
+      'Add-Type -TypeDefinition $d -ErrorAction SilentlyContinue',
+      '[_QE]::Disable()',
+    ].join('\n');
+
+    const b64 = Buffer.from(psScript, 'utf16le').toString('base64');
+    spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-EncodedCommand', b64], {
+      stdio: 'ignore',
+      timeout: 3000,
+    });
+  } catch {
+    /* ignore on non-Windows / Windows Terminal */
+  }
+}
 
 export interface SplashOptions {
   title: string;
@@ -780,6 +818,7 @@ export function runSplash({
     }
 
     // ── boot ───────────────────────────────────────────────────────────────
+    disableWinQuickEdit();
     // Force UTF-8 output so box-drawing characters render correctly in both
     // CMD and PowerShell (PowerShell defaults to the system OEM code page).
     out.write('\x1b%G');   // ESC % G  — switch terminal to UTF-8 mode
