@@ -47,7 +47,7 @@ export function processSlashCommand(
       const activeMark = t.id === theme.id ? ' * (active)' : '';
       log(`   • ${t.id.padEnd(10)} — ${t.name}${activeMark}`);
     });
-    log(`[theme] To switch: type /theme <name> (e.g. /theme phantom, /theme matrix)`);
+    log(`[theme] To switch: type /theme <name> (e.g. /theme cyberpunk, /theme dusk-circuit)`);
     return true;
   }
 
@@ -65,7 +65,7 @@ export function processSlashCommand(
     return true;
   }
 
-  // ── Direct theme shortcuts: /phantom, /matrix, /cyberpunk, /dracula ──────
+  // ── Direct theme shortcuts: /cyberpunk, /dusk-circuit, /neon-tokyo, etc. ──────
   const directTheme = findTheme(cmd);
   if (directTheme) {
     const next = setCurrentTheme(directTheme);
@@ -77,7 +77,7 @@ export function processSlashCommand(
   if (cmd === 'help') {
     log(`[commands] NeoLoop CLI Commands:`);
     log(`   /theme              Show current theme & available options`);
-    log(`   /theme <name>       Switch active theme (e.g. /theme phantom)`);
+    log(`   /theme <name>       Switch active theme (e.g. /theme cyberpunk)`);
     log(`   /themes             List all registered themes`);
     log(`   /help               Show this help message`);
     log(`   /clear              Clear scrollback logs`);

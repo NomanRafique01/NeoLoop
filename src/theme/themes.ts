@@ -11,6 +11,9 @@ import { duskCircuit } from './dusk-circuit/index.js';
 import { neonTokyo } from './neon-tokyo/index.js';
 import { arcticGold } from './arctic-gold/index.js';
 import { auroraMint } from './aurora-mint/index.js';
+import { royalSunset } from './royal-sunset/index.js';
+import { ghostProtocol } from './ghost-protocol/index.js';
+import { roseSignature } from './rose-signature/index.js';
 
 // Export individual theme modules
 export * from './cyberpunk/index.js';
@@ -18,13 +21,19 @@ export * from './dusk-circuit/index.js';
 export * from './neon-tokyo/index.js';
 export * from './arctic-gold/index.js';
 export * from './aurora-mint/index.js';
+export * from './royal-sunset/index.js';
+export * from './ghost-protocol/index.js';
+export * from './rose-signature/index.js';
 
 export const themes: Record<string, ThemeTokens> = {
   cyberpunk,
-  'dusk-circuit': duskCircuit,
-  'neon-tokyo':   neonTokyo,
-  'arctic-gold':  arcticGold,
-  'aurora-mint':  auroraMint,
+  'dusk-circuit':   duskCircuit,
+  'neon-tokyo':     neonTokyo,
+  'arctic-gold':    arcticGold,
+  'aurora-mint':    auroraMint,
+  'royal-sunset':   royalSunset,
+  'ghost-protocol': ghostProtocol,
+  'rose-signature': roseSignature,
 };
 
 export const DEFAULT_THEME_ID = 'cyberpunk';
