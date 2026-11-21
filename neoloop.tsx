@@ -8,8 +8,8 @@
  */
 import React, { useState } from 'react';
 import { render, useInput } from 'ink';
-import { runSplash } from './src/core/index.js';
-import { WelcomeScreen } from './src/ui/index.js';
+import { runSplash } from './src/core/splash.js';
+import { WelcomeScreen } from './src/ui/WelcomeScreen.js';
 
 // ---------------------------------------------------------------------------
 // Config

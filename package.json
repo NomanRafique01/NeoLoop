@@ -5,6 +5,7 @@
   "description": "NeoLoop — Terminal-native AI coding agent CLI",
   "scripts": {
     "start":     "tsx neoloop.tsx",
+    "start:ps":  "powershell -NoProfile -ExecutionPolicy Bypass -File neoloop.ps1",
     "dev":       "tsx neoloop.tsx",
     "typecheck": "tsc --noEmit"
   },
