@@ -13,6 +13,7 @@ export type KeyAction =
   | { type: 'ctrl-x' }         // Cut
   | { type: 'esc' }
   | { type: 'enter' }
+  | { type: 'newline' }        // Shift+Enter / Alt+Enter / multiline insert
   | { type: 'tab' }
   | { type: 'backspace' }
   | { type: 'delete' }
@@ -24,23 +25,26 @@ export type KeyAction =
   | { type: 'end' }
   | { type: 'pgup' }
   | { type: 'pgdn' }
+  | { type: 'shift-up' }
+  | { type: 'shift-down' }
   | { type: 'ctrl-up' }
   | { type: 'ctrl-down' }
   | { type: 'ctrl-home' }
   | { type: 'ctrl-end' }
-  | { type: 'wheel-up' }
-  | { type: 'wheel-down' }
+  | { type: 'wheel-up'; x?: number; y?: number }
+  | { type: 'wheel-down'; x?: number; y?: number }
   | { type: 'paste'; text: string }
   | { type: 'char'; char: string }
   | { type: 'right-click'; x: number; y: number }
   | { type: 'left-click'; x: number; y: number };
 
 /**
- * Clean pasted text: replace newlines with space, strip non-printable control characters.
+ * Clean pasted text: normalize newlines to \n, strip non-printable control characters.
  */
 function cleanPastedText(raw: string): string {
   return raw
-    .replace(/[\r\n]+/g, ' ')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
     .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
 }
 
@@ -86,7 +90,7 @@ export function parseKeyActions(buf: Buffer | string): KeyAction[] {
   }
 
   // 2.5 SGR mouse event: \x1b[<Pb;Px;PyM (press) or \x1b[<Pb;Px;Pym (release)
-  //   button 0 = left, button 2 = right
+  //   button 0 = left, button 2 = right, 64 = wheel up, 65 = wheel down
   const sgrMouseRegex = /\x1b\[<(\d+);(\d+);(\d+)([Mm])/g;
   let mouseMatch: RegExpExecArray | null;
   let mouseLastIndex = 0;
@@ -100,18 +104,21 @@ export function parseKeyActions(buf: Buffer | string): KeyAction[] {
     const mx  = parseInt(mouseMatch[2]!, 10) - 1; // convert 1-based to 0-based
     const my  = parseInt(mouseMatch[3]!, 10) - 1;
     const isPress = mouseMatch[4] === 'M';
-    if (isPress) {
-      if (rawBtn === 64) {
-        actions.push({ type: 'wheel-up' });
-      } else if (rawBtn === 65) {
-        actions.push({ type: 'wheel-down' });
-      } else {
-        const btn = rawBtn & 3; // mask lower 2 bits for button
-        if (btn === 2) {
-          actions.push({ type: 'right-click', x: mx, y: my });
-        } else if (btn === 0) {
-          actions.push({ type: 'left-click', x: mx, y: my });
-        }
+
+    if ((rawBtn & 64) !== 0) {
+      // Wheel events (can be sent with 'M' or 'm' depending on terminal/driver)
+      const dir = rawBtn & 3;
+      if (dir === 0) {
+        actions.push({ type: 'wheel-up', x: mx, y: my });
+      } else if (dir === 1) {
+        actions.push({ type: 'wheel-down', x: mx, y: my });
+      }
+    } else if (isPress) {
+      const btn = rawBtn & 3; // mask lower 2 bits for button
+      if (btn === 2) {
+        actions.push({ type: 'right-click', x: mx, y: my });
+      } else if (btn === 0) {
+        actions.push({ type: 'left-click', x: mx, y: my });
       }
     }
     mouseLastIndex = sgrMouseRegex.lastIndex;
@@ -121,6 +128,47 @@ export function parseKeyActions(buf: Buffer | string): KeyAction[] {
       actions.push(...parseKeyActions(s.slice(mouseLastIndex)));
     }
     return actions;
+  }
+
+  // 2.6 Standard X10/X11 mouse event: \x1b[M followed by 3 bytes (Cb, Cx, Cy)
+  if (s.includes('\x1b[M')) {
+    const x10Regex = /\x1b\[M([\s\S]{3})/g;
+    let x10Match: RegExpExecArray | null;
+    let x10LastIndex = 0;
+    let hasX10 = false;
+    while ((x10Match = x10Regex.exec(s)) !== null) {
+      hasX10 = true;
+      if (x10Match.index > x10LastIndex) {
+        actions.push(...parseKeyActions(s.slice(x10LastIndex, x10Match.index)));
+      }
+      const bytes = x10Match[1]!;
+      const cb = bytes.charCodeAt(0) - 32;
+      const cx = bytes.charCodeAt(1) - 32 - 1;
+      const cy = bytes.charCodeAt(2) - 32 - 1;
+
+      if ((cb & 64) !== 0) {
+        const dir = cb & 3;
+        if (dir === 0) {
+          actions.push({ type: 'wheel-up', x: cx, y: cy });
+        } else if (dir === 1) {
+          actions.push({ type: 'wheel-down', x: cx, y: cy });
+        }
+      } else {
+        const btn = cb & 3;
+        if (btn === 2) {
+          actions.push({ type: 'right-click', x: cx, y: cy });
+        } else if (btn === 0) {
+          actions.push({ type: 'left-click', x: cx, y: cy });
+        }
+      }
+      x10LastIndex = x10Regex.lastIndex;
+    }
+    if (hasX10) {
+      if (x10LastIndex < s.length) {
+        actions.push(...parseKeyActions(s.slice(x10LastIndex)));
+      }
+      return actions;
+    }
   }
 
   // 3. Sequential key parsing
@@ -157,6 +205,42 @@ export function parseKeyActions(buf: Buffer | string): KeyAction[] {
     // Escape sequences
     if (s[i] === '\x1b') {
       const rest = s.slice(i);
+
+      // Shift+Enter / Alt+Enter / Ctrl+Enter: newline action
+      if (rest.startsWith('\x1b[13;2u') || rest.startsWith('\x1b[13;3u') || rest.startsWith('\x1b[13;5u')) {
+        actions.push({ type: 'newline' });
+        i += 6;
+        continue;
+      }
+      if (rest.startsWith('\x1b[27;2;13~') || rest.startsWith('\x1b[27;5;13~')) {
+        actions.push({ type: 'newline' });
+        i += 9;
+        continue;
+      }
+      if (rest.startsWith('\x1bOM')) {
+        actions.push({ type: 'newline' });
+        i += 3;
+        continue;
+      }
+      if (rest.startsWith('\x1b\r') || rest.startsWith('\x1b\n')) {
+        actions.push({ type: 'newline' });
+        i += 2;
+        continue;
+      }
+
+      // Shift+Up / Alt+Up: \x1b[1;2A or \x1b[1;3A
+      if (rest.startsWith('\x1b[1;2A') || rest.startsWith('\x1b[1;3A')) {
+        actions.push({ type: 'shift-up' });
+        i += 6;
+        continue;
+      }
+
+      // Shift+Down / Alt+Down: \x1b[1;2B or \x1b[1;3B
+      if (rest.startsWith('\x1b[1;2B') || rest.startsWith('\x1b[1;3B')) {
+        actions.push({ type: 'shift-down' });
+        i += 6;
+        continue;
+      }
 
       // Ctrl+Up: \x1b[1;5A or \x1bO5A
       if (rest.startsWith('\x1b[1;5A') || rest.startsWith('\x1bO5A')) {

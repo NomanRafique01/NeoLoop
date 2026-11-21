@@ -485,6 +485,8 @@ export function runSplash({
     let inputVisible = false;
     let inputBuffer = '';
     let cursorIdx = 0;
+    let inputScrollTop = 0;
+    let barHeight = 1;
     let isSelectedAll = false;  // Ctrl+A selection state
     let cursorOn = true;
     let cursorTimer: NodeJS.Timeout | undefined;
@@ -505,9 +507,9 @@ export function runSplash({
       mouseEnabled = enabled;
       if (running) {
         if (mouseEnabled) {
-          out.write('\x1b[?1000h\x1b[?1006h');
+          out.write('\x1b[?1000h\x1b[?1002h\x1b[?1006h');
         } else {
-          out.write('\x1b[?1000l\x1b[?1006l\x1b[?1002l');
+          out.write('\x1b[?1000l\x1b[?1002l\x1b[?1006l');
         }
       }
     }
@@ -645,15 +647,17 @@ export function runSplash({
       const tagRow = y0 + (fullBig ? logoH + 1 : 2);
 
       const normalStreamH = Math.min(Math.max(6, H - 4), tagRow + 1);
-      const normalOutStartY = normalStreamH + barHeight + 2;
+      // Use barHeight=1 (minimum) for layout decisions so a large in-progress
+      // input buffer never wrongly triggers compact/single-line header mode.
+      const normalOutStartY = normalStreamH + 1 + 2;
       const normalViewportRows = H - normalOutStartY;
 
       if (normalViewportRows >= 6) {
         headerMode = 'full';
         streamH = normalStreamH;
       } else {
-        const noRainStreamH = Math.min(H - barHeight - 2, tagRow + 1);
-        const noRainViewportRows = H - (noRainStreamH + barHeight + 2);
+        const noRainStreamH = Math.min(H - 1 - 2, tagRow + 1);
+        const noRainViewportRows = H - (noRainStreamH + 1 + 2);
         if (noRainViewportRows >= 6) {
           headerMode = 'compact-no-rain';
           streamH = noRainStreamH;
@@ -846,47 +850,142 @@ export function runSplash({
       }
     }
 
-    // ── Input bar geometry (recalculated each frame) ──────────────────────────
-    // barHeight = number of content rows (1 minimum, grows as text wraps)
-    let barHeight = 1;
+    // ── Input bar geometry & visual rows ──────────────────────────────────────
+    interface VisualRow {
+      text: string;
+      startIdx: number;
+      endIdx: number;
+    }
 
-    function getInputRows(): string[] {
-      // Available text columns: W - 2 (side padding) - 2 (prompt "> ") - 2 (margins)
-      const textCols = Math.max(1, W - 6);
-      if (inputBuffer.length === 0) return [''];
-      const rows: string[] = [];
-      let remaining = inputBuffer;
-      while (remaining.length > 0) {
-        rows.push(remaining.slice(0, textCols));
-        remaining = remaining.slice(textCols);
+    function getVisualInputRows(textCols: number): {
+      rows: VisualRow[];
+      cursorRow: number;
+      cursorCol: number;
+    } {
+      if (inputBuffer.length === 0) {
+        return {
+          rows: [{ text: '', startIdx: 0, endIdx: 0 }],
+          cursorRow: 0,
+          cursorCol: 0,
+        };
       }
-      return rows;
+
+      const rows: VisualRow[] = [];
+      const lines = inputBuffer.split('\n');
+      let currentIdx = 0;
+
+      for (let l = 0; l < lines.length; l++) {
+        const line = lines[l]!;
+        if (line.length === 0) {
+          rows.push({
+            text: '',
+            startIdx: currentIdx,
+            endIdx: currentIdx,
+          });
+        } else {
+          let offset = 0;
+          while (offset < line.length) {
+            const slice = line.slice(offset, offset + textCols);
+            rows.push({
+              text: slice,
+              startIdx: currentIdx + offset,
+              endIdx: currentIdx + offset + slice.length,
+            });
+            offset += textCols;
+          }
+        }
+        currentIdx += line.length + (l < lines.length - 1 ? 1 : 0);
+      }
+
+      // Compute cursor row & column within visual rows
+      let cursorRow = 0;
+      let cursorCol = 0;
+      for (let r = 0; r < rows.length; r++) {
+        const row = rows[r]!;
+        if (cursorIdx >= row.startIdx && cursorIdx <= row.endIdx) {
+          cursorRow = r;
+          cursorCol = cursorIdx - row.startIdx;
+          if (cursorIdx === row.endIdx && r < rows.length - 1) {
+            const nextRow = rows[r + 1]!;
+            if (nextRow.startIdx === cursorIdx) {
+              cursorRow = r + 1;
+              cursorCol = 0;
+            }
+          }
+          break;
+        }
+      }
+
+      return { rows, cursorRow, cursorCol };
+    }
+
+    function autoScrollToCursor() {
+      const textCols = Math.max(1, W - 7);
+      const { rows: inputRows, cursorRow } = getVisualInputRows(textCols);
+      const MAX_BAR_ROWS    = 10;
+      const MIN_OUTPUT_ROWS = 4;
+      const availH          = Math.max(1, H - streamH - 2);
+      const maxBarRows      = Math.max(1, Math.min(MAX_BAR_ROWS, availH - MIN_OUTPUT_ROWS));
+      const curBarHeight    = Math.max(1, Math.min(inputRows.length, maxBarRows));
+      const maxInputScroll  = Math.max(0, inputRows.length - curBarHeight);
+
+      if (cursorRow < inputScrollTop) {
+        inputScrollTop = cursorRow;
+      } else if (cursorRow >= inputScrollTop + curBarHeight) {
+        inputScrollTop = cursorRow - curBarHeight + 1;
+      }
+      inputScrollTop = Math.max(0, Math.min(inputScrollTop, maxInputScroll));
     }
 
     // ── Paint dashed border input bar ────────────────────────────────────────
     function paintInputBar() {
       if (!inputVisible) return;
 
-      const borderCol   = theme.inputBorder || theme.border;
-      const promptCol   = theme.userTalk?.prompt || theme.accent;
-      const userTextCol = theme.userTalk?.text || theme.inputText;
-      const selBg       = theme.selection;
-      const selFg       = theme.background;
-      const cursorCol   = theme.cursor;
+      const borderCol      = theme.inputBorder || theme.border;
+      const promptCol      = theme.userTalk?.prompt || theme.accent;
+      const userTextCol    = theme.userTalk?.text || theme.inputText;
+      const selBg          = theme.selection;
+      const selFg          = theme.background;
+      const cursorColor    = theme.cursor;
       const placeholderCol = theme.inputPlaceholder;
 
       const ruleWidth  = Math.max(1, W - 2);
       const dashedRule = '-'.repeat(ruleWidth);
-      const textCols   = Math.max(1, W - 6); // columns available per text row
+      const textCols   = Math.max(1, W - 7); // columns available per text row (leaves room for scrollbar)
       const textStartX = 4;                   // where text begins (after "> ")
 
-      // ── Compute wrapped rows and new barHeight ────────────────────────────
-      const inputRows = getInputRows();
-      barHeight = Math.max(1, inputRows.length);
+      // ── Compute wrapped rows & cursor ─────────────────────────────────────
+      const { rows: inputRows, cursorRow, cursorCol } = getVisualInputRows(textCols);
+
+      // Input bar expands up to 10 lines as user types or pastes.
+      // When input has more than 10 lines, it becomes scrollable.
+      const MAX_BAR_ROWS    = 10;
+      const MIN_OUTPUT_ROWS = 4;
+      const availH          = Math.max(1, H - streamH - 2);
+      const maxBarRows      = Math.max(1, Math.min(MAX_BAR_ROWS, availH - MIN_OUTPUT_ROWS));
+      barHeight = Math.max(1, Math.min(inputRows.length, maxBarRows));
+
+      const isScrollable   = inputRows.length > barHeight;
+      const maxInputScroll = Math.max(0, inputRows.length - barHeight);
+      inputScrollTop = Math.max(0, Math.min(inputScrollTop, maxInputScroll));
+
+      // Visual cursor row within the displayed window
+      const cursorRowVisible = cursorRow - inputScrollTop;
 
       // ── 1) Top dashed border ──────────────────────────────────────────────
       const topY = streamH;
-      writeRow(topY, 1, dashedRule, borderCol);
+      if (inputScrollTop > 0) {
+        const tag = ` [▲ ${inputScrollTop} line${inputScrollTop > 1 ? 's' : ''} above] `;
+        if (tag.length < ruleWidth - 4) {
+          const sideLen = Math.floor((ruleWidth - tag.length) / 2);
+          const topWithTag = '-'.repeat(sideLen) + tag + '-'.repeat(ruleWidth - sideLen - tag.length);
+          writeRow(topY, 1, topWithTag, borderCol);
+        } else {
+          writeRow(topY, 1, dashedRule, borderCol);
+        }
+      } else {
+        writeRow(topY, 1, dashedRule, borderCol);
+      }
 
       // ── 2) Content rows ───────────────────────────────────────────────────
       if (inputBuffer.length === 0) {
@@ -895,54 +994,63 @@ export function runSplash({
         writeRow(promptY, 2, '> ', promptCol);
 
         // Blinking block cursor at col 4
-        setCell(promptY, textStartX, cursorOn ? '█' : ' ', cursorOn ? cursorCol : '');
+        setCell(promptY, textStartX, cursorOn ? '█' : ' ', cursorOn ? cursorColor : '');
 
         // Placeholder text starting at col 6
         const maxPhLen = Math.max(0, W - 6 - 2);
         const ph = BAR_PLACEHOLDER.slice(0, maxPhLen);
         writeRow(promptY, 6, ph, placeholderCol);
       } else {
-        // Determine which visual row+col the cursor is on
-        const cursorRow = Math.floor(cursorIdx / textCols);
-        const cursorCol_ = cursorIdx % textCols;
+        for (let r = 0; r < barHeight; r++) {
+          const srcRow  = inputScrollTop + r;
+          const rowY    = streamH + 1 + r;
+          const vRow    = inputRows[srcRow];
+          const rowText = vRow ? vRow.text : '';
 
-        for (let r = 0; r < inputRows.length; r++) {
-          const rowY = streamH + 1 + r;
-          const rowText = inputRows[r]!;
-          const rowStart = r * textCols; // buffer offset where this row starts
-
-          // Prompt symbol only on the first row; continuation rows get indent
-          if (r === 0) {
+          // Prompt symbol only on the first logical row; continuations get indent
+          if (srcRow === 0) {
             writeRow(rowY, 2, '> ', promptCol);
           } else {
-            // Visual continuation indent: "  ⋮ " styled with muted border color
             writeRow(rowY, 2, '  ', '');
           }
 
           if (isSelectedAll) {
             // ── Selection highlight: entire buffer selected ──────────────────
             const displayText = rowText.padEnd(Math.min(rowText.length + 1, textCols));
-            for (let k = 0; k < displayText.length && textStartX + k < W; k++) {
+            for (let k = 0; k < displayText.length && textStartX + k < W - 2; k++) {
               setCell(rowY, textStartX + k, displayText[k]!, `BG:${selBg};FG:${selFg};BOLD`);
             }
           } else {
             // ── Normal text rendering ────────────────────────────────────────
             writeRow(rowY, textStartX, rowText, userTextCol);
 
-            // ── Cursor ───────────────────────────────────────────────────────
-            if (r === cursorRow) {
-              const curX = textStartX + cursorCol_;
-              if (curX < W) {
-                if (cursorCol_ < rowText.length) {
+            // ── Cursor (only on the row that contains the cursor) ─────────────
+            if (r === cursorRowVisible) {
+              const curX = textStartX + cursorCol;
+              if (curX < W - 2) {
+                if (cursorCol < rowText.length) {
                   // Over a character — inverted block
-                  const ch = rowText[cursorCol_]!;
+                  const ch = rowText[cursorCol]!;
                   setCell(rowY, curX, ch,
-                    cursorOn ? `BG:${cursorCol};FG:#0a0a0a;BOLD` : userTextCol);
+                    cursorOn ? `BG:${cursorColor};FG:#0a0a0a;BOLD` : userTextCol);
                 } else {
                   // After text (end of line)
-                  setCell(rowY, curX, cursorOn ? '█' : ' ', cursorOn ? cursorCol : '');
+                  setCell(rowY, curX, cursorOn ? '█' : ' ', cursorOn ? cursorColor : '');
                 }
               }
+            }
+          }
+
+          // ── Scrollbar track & thumb on the right edge if scrollable ─────────
+          if (isScrollable) {
+            const scrollbarX = W - 2;
+            const thumbRow = maxInputScroll > 0
+              ? Math.round((inputScrollTop / maxInputScroll) * (barHeight - 1))
+              : 0;
+            if (r === thumbRow) {
+              setCell(rowY, scrollbarX, '█', theme.accent);
+            } else {
+              setCell(rowY, scrollbarX, '│', borderCol);
             }
           }
         }
@@ -950,7 +1058,19 @@ export function runSplash({
 
       // ── 3) Bottom dashed border (always after all content rows) ───────────
       const botY = streamH + 1 + barHeight;
-      writeRow(botY, 1, dashedRule, borderCol);
+      const linesBelow = maxInputScroll - inputScrollTop;
+      if (linesBelow > 0) {
+        const tag = ` [▼ ${linesBelow} line${linesBelow > 1 ? 's' : ''} below (scroll to see)] `;
+        if (tag.length < ruleWidth - 4) {
+          const sideLen = Math.floor((ruleWidth - tag.length) / 2);
+          const botWithTag = '-'.repeat(sideLen) + tag + '-'.repeat(ruleWidth - sideLen - tag.length);
+          writeRow(botY, 1, botWithTag, borderCol);
+        } else {
+          writeRow(botY, 1, dashedRule, borderCol);
+        }
+      } else {
+        writeRow(botY, 1, dashedRule, borderCol);
+      }
     }
 
     // ── Paint theme picker panel ─────────────────────────────────────────────
@@ -1076,7 +1196,10 @@ export function runSplash({
 
       const matching = getMatchingCommands();
       if (matching.length === 0) {
-        writeRow(menuStartY, 2, 'No matching commands', dimColor);
+        // Only show "no match" hint when user has actually typed a /command prefix
+        if (inputBuffer.trimStart().startsWith('/')) {
+          writeRow(menuStartY, 2, 'No matching commands', dimColor);
+        }
         return;
       }
 
@@ -1357,10 +1480,11 @@ export function runSplash({
         case 'paste':
           readFromClipboard().then(text => {
             if (text) {
-              const clean = text.replace(/[\r\n]+/g, ' ').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
+              const clean = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
               inputBuffer = inputBuffer.slice(0, cursorIdx) + clean + inputBuffer.slice(cursorIdx);
               cursorIdx  += clean.length;
-              if (inputBuffer.startsWith('/')) {
+              autoScrollToCursor();
+              if (inputBuffer.startsWith('/') && !inputBuffer.includes('\n')) {
                 mode = 'slashMenu';
                 slashMenuSelectedIndex = 0;
               }
@@ -1453,10 +1577,14 @@ export function runSplash({
 
       if (mode === 'themePicker') {
         paintThemePicker();
-      } else if (mode === 'slashMenu') {
-        paintSlashMenu();
       } else {
+        // Always paint the scrollable log first so the output viewport is never
+        // invisible. The slash-command menu is then drawn on top as an overlay —
+        // this way logs remain visible (and scrollable) even while typing a command.
         paintLogs();
+        if (mode === 'slashMenu') {
+          paintSlashMenu();
+        }
       }
 
       paintContextMenu();
@@ -1589,7 +1717,7 @@ export function runSplash({
         if (mode === 'input' || mode === 'slashMenu') {
           readFromClipboard().then(text => {
             if (text) {
-              const clean = text.replace(/[\r\n]+/g, ' ').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
+              const clean = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
               if (isSelectedAll) {
                 inputBuffer = clean;
                 cursorIdx = clean.length;
@@ -1598,7 +1726,8 @@ export function runSplash({
                 inputBuffer = inputBuffer.slice(0, cursorIdx) + clean + inputBuffer.slice(cursorIdx);
                 cursorIdx += clean.length;
               }
-              if (inputBuffer.startsWith('/')) {
+              autoScrollToCursor();
+              if (inputBuffer.startsWith('/') && !inputBuffer.includes('\n')) {
                 mode = 'slashMenu';
                 slashMenuSelectedIndex = 0;
               } else {
@@ -1880,6 +2009,12 @@ export function runSplash({
       }
 
       if (action.type === 'pgup') {
+        const textCols = Math.max(1, W - 7);
+        const { rows: vRows } = getVisualInputRows(textCols);
+        if (vRows.length > barHeight) {
+          inputScrollTop = Math.max(0, inputScrollTop - Math.max(1, barHeight - 1));
+          return;
+        }
         accelStep = 1;
         updateScroll(scrollTop - Math.max(1, viewportRows - 1));
         requestScrollRepaint();
@@ -1887,9 +2022,35 @@ export function runSplash({
       }
 
       if (action.type === 'pgdn') {
+        const textCols = Math.max(1, W - 7);
+        const { rows: vRows } = getVisualInputRows(textCols);
+        const maxInputScroll = Math.max(0, vRows.length - barHeight);
+        if (vRows.length > barHeight) {
+          inputScrollTop = Math.min(maxInputScroll, inputScrollTop + Math.max(1, barHeight - 1));
+          return;
+        }
         accelStep = 1;
         updateScroll(scrollTop + Math.max(1, viewportRows - 1));
         requestScrollRepaint();
+        return;
+      }
+
+      if (action.type === 'shift-up') {
+        const textCols = Math.max(1, W - 7);
+        const { rows: vRows } = getVisualInputRows(textCols);
+        if (vRows.length > barHeight) {
+          inputScrollTop = Math.max(0, inputScrollTop - 1);
+        }
+        return;
+      }
+
+      if (action.type === 'shift-down') {
+        const textCols = Math.max(1, W - 7);
+        const { rows: vRows } = getVisualInputRows(textCols);
+        const maxInputScroll = Math.max(0, vRows.length - barHeight);
+        if (vRows.length > barHeight) {
+          inputScrollTop = Math.min(maxInputScroll, inputScrollTop + 1);
+        }
         return;
       }
 
@@ -1923,6 +2084,18 @@ export function runSplash({
 
       if (action.type === 'wheel-up') {
         if (!mouseEnabled) return;
+        const textCols = Math.max(1, W - 7);
+        const { rows: vRows } = getVisualInputRows(textCols);
+
+        const isOverLogs = action.y !== undefined && action.y >= streamH + barHeight + 2;
+        const canScrollInput = vRows.length > barHeight && !isOverLogs;
+
+        if (canScrollInput && inputScrollTop > 0) {
+          inputScrollTop = Math.max(0, inputScrollTop - 2);
+          requestScrollRepaint();
+          return;
+        }
+
         const mult = getScrollStep(-1);
         const step = Math.min(12, 3 + (mult > 1 ? mult : 0));
         updateScroll(scrollTop - step);
@@ -1932,6 +2105,19 @@ export function runSplash({
 
       if (action.type === 'wheel-down') {
         if (!mouseEnabled) return;
+        const textCols = Math.max(1, W - 7);
+        const { rows: vRows } = getVisualInputRows(textCols);
+        const maxInputScroll = Math.max(0, vRows.length - barHeight);
+
+        const isOverLogs = action.y !== undefined && action.y >= streamH + barHeight + 2;
+        const canScrollInput = vRows.length > barHeight && !isOverLogs;
+
+        if (canScrollInput && inputScrollTop < maxInputScroll) {
+          inputScrollTop = Math.min(maxInputScroll, inputScrollTop + 2);
+          requestScrollRepaint();
+          return;
+        }
+
         const mult = getScrollStep(1);
         const step = Math.min(12, 3 + (mult > 1 ? mult : 0));
         updateScroll(scrollTop + step);
@@ -1947,6 +2133,7 @@ export function runSplash({
         // Esc clears the line
         inputBuffer = '';
         cursorIdx = 0;
+        inputScrollTop = 0;
         historyIndex = -1;
         savedDraft = '';
         return;
@@ -1955,18 +2142,28 @@ export function runSplash({
       if (action.type === 'left') {
         isSelectedAll = false;
         cursorIdx = Math.max(0, cursorIdx - 1);
+        autoScrollToCursor();
         return;
       }
 
       if (action.type === 'right') {
         isSelectedAll = false;
         cursorIdx = Math.min(inputBuffer.length, cursorIdx + 1);
+        autoScrollToCursor();
         return;
       }
 
       if (action.type === 'home') {
         isSelectedAll = false;
-        cursorIdx = 0;
+        const textCols = Math.max(1, W - 7);
+        const { rows: vRows, cursorRow } = getVisualInputRows(textCols);
+        const curRow = vRows[cursorRow];
+        if (curRow && cursorIdx !== curRow.startIdx) {
+          cursorIdx = curRow.startIdx;
+        } else {
+          cursorIdx = 0;
+          inputScrollTop = 0;
+        }
         return;
       }
 
@@ -1980,7 +2177,14 @@ export function runSplash({
           return;
         }
         isSelectedAll = false;
-        cursorIdx = inputBuffer.length;
+        const textCols = Math.max(1, W - 7);
+        const { rows: vRows, cursorRow } = getVisualInputRows(textCols);
+        const curRow = vRows[cursorRow];
+        if (curRow && cursorIdx !== curRow.endIdx) {
+          cursorIdx = curRow.endIdx;
+        } else {
+          cursorIdx = inputBuffer.length;
+        }
         return;
       }
 
@@ -1989,10 +2193,12 @@ export function runSplash({
           inputBuffer = '';
           cursorIdx = 0;
           isSelectedAll = false;
+          inputScrollTop = 0;
           return;
         }
         if (cursorIdx < inputBuffer.length) {
           inputBuffer = inputBuffer.slice(0, cursorIdx) + inputBuffer.slice(cursorIdx + 1);
+          autoScrollToCursor();
         }
         return;
       }
@@ -2002,18 +2208,34 @@ export function runSplash({
           inputBuffer = '';
           cursorIdx = 0;
           isSelectedAll = false;
+          inputScrollTop = 0;
           return;
         }
         if (cursorIdx > 0) {
           inputBuffer = inputBuffer.slice(0, cursorIdx - 1) + inputBuffer.slice(cursorIdx);
           cursorIdx--;
+          autoScrollToCursor();
         }
         return;
       }
 
       if (action.type === 'up') {
-        // Browse command history backwards
         isSelectedAll = false;
+        const textCols = Math.max(1, W - 7);
+        const { rows: vRows, cursorRow, cursorCol } = getVisualInputRows(textCols);
+
+        // If in multi-line prompt and not on the first visual row, navigate up
+        if (vRows.length > 1 && cursorRow > 0) {
+          const targetRow = vRows[cursorRow - 1]!;
+          const targetCol = Math.min(cursorCol, targetRow.text.length);
+          cursorIdx = targetRow.startIdx + targetCol;
+          if (cursorRow - 1 < inputScrollTop) {
+            inputScrollTop = cursorRow - 1;
+          }
+          return;
+        }
+
+        // Browse command history backwards
         if (commandHistory.length > 0) {
           if (historyIndex === -1) {
             savedDraft = inputBuffer;
@@ -2024,14 +2246,29 @@ export function runSplash({
           if (historyIndex >= 0 && historyIndex < commandHistory.length) {
             inputBuffer = commandHistory[historyIndex]!;
             cursorIdx = inputBuffer.length;
+            inputScrollTop = 0;
           }
         }
         return;
       }
 
       if (action.type === 'down') {
-        // Browse command history forwards
         isSelectedAll = false;
+        const textCols = Math.max(1, W - 7);
+        const { rows: vRows, cursorRow, cursorCol } = getVisualInputRows(textCols);
+
+        // If in multi-line prompt and not on the last visual row, navigate down
+        if (vRows.length > 1 && cursorRow < vRows.length - 1) {
+          const targetRow = vRows[cursorRow + 1]!;
+          const targetCol = Math.min(cursorCol, targetRow.text.length);
+          cursorIdx = targetRow.startIdx + targetCol;
+          if (cursorRow + 1 >= inputScrollTop + barHeight) {
+            inputScrollTop = cursorRow + 1 - barHeight + 1;
+          }
+          return;
+        }
+
+        // Browse command history forwards
         if (historyIndex !== -1) {
           historyIndex++;
           if (historyIndex >= commandHistory.length) {
@@ -2042,7 +2279,21 @@ export function runSplash({
             inputBuffer = commandHistory[historyIndex]!;
             cursorIdx = inputBuffer.length;
           }
+          inputScrollTop = 0;
         }
+        return;
+      }
+
+      if (action.type === 'newline') {
+        if (isSelectedAll) {
+          inputBuffer = '\n';
+          cursorIdx = 1;
+          isSelectedAll = false;
+        } else {
+          inputBuffer = inputBuffer.slice(0, cursorIdx) + '\n' + inputBuffer.slice(cursorIdx);
+          cursorIdx++;
+        }
+        autoScrollToCursor();
         return;
       }
 
@@ -2056,7 +2307,8 @@ export function runSplash({
           inputBuffer = inputBuffer.slice(0, cursorIdx) + pasteText + inputBuffer.slice(cursorIdx);
           cursorIdx += pasteText.length;
         }
-        if (inputBuffer.startsWith('/')) {
+        autoScrollToCursor();
+        if (inputBuffer.startsWith('/') && !inputBuffer.includes('\n')) {
           mode = 'slashMenu';
           slashMenuSelectedIndex = 0;
         }
@@ -2072,7 +2324,8 @@ export function runSplash({
           inputBuffer = inputBuffer.slice(0, cursorIdx) + action.char + inputBuffer.slice(cursorIdx);
           cursorIdx += action.char.length;
         }
-        if (inputBuffer.startsWith('/')) {
+        autoScrollToCursor();
+        if (inputBuffer.startsWith('/') && !inputBuffer.includes('\n')) {
           mode = 'slashMenu';
           slashMenuSelectedIndex = 0;
         }
@@ -2084,6 +2337,7 @@ export function runSplash({
         const trimmed = inputBuffer.trim();
         inputBuffer = '';
         cursorIdx = 0;
+        inputScrollTop = 0;
         historyIndex = -1;
         savedDraft = '';
 
@@ -2175,7 +2429,7 @@ export function runSplash({
     // UTF-8 mode, enter alternate screen buffer, hide cursor, enable bracketed paste.
     out.write('\x1b%G\x1b[?1049h\x1b[?25l\x1b[?2004h');
     if (mouseEnabled) {
-      out.write('\x1b[?1000h\x1b[?1006h');
+      out.write('\x1b[?1000h\x1b[?1002h\x1b[?1006h');
     }
     init();
     out.on('resize', init);

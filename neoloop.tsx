@@ -56,7 +56,7 @@ function NonTTYApp() {
     if (key.ctrl && (ch === 'v' || ch === '\x16')) {
       readFromClipboard().then(pasted => {
         if (pasted) {
-          const clean = pasted.replace(/[\r\n]+/g, ' ');
+          const clean = pasted.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
           if (isSelectedAll) {
             setInput(clean);
             setIsSelectedAll(false);

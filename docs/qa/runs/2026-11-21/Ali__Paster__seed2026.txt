@@ -1,0 +1,29 @@
+RangeError: Maximum call stack size exceeded
+    at RegExp.exec (<anonymous>)
+    at parseKeyActions (C:\Users\pc\Desktop\My Projects\NeoLoop\src\core\keys.ts:60:29)
+    at parseKeyActions (C:\Users\pc\Desktop\My Projects\NeoLoop\src\core\keys.ts:72:23)
+    at parseKeyActions (C:\Users\pc\Desktop\My Projects\NeoLoop\src\core\keys.ts:72:23)
+    at parseKeyActions (C:\Users\pc\Desktop\My Projects\NeoLoop\src\core\keys.ts:72:23)
+    at parseKeyActions (C:\Users\pc\Desktop\My Projects\NeoLoop\src\core\keys.ts:72:23)
+    at parseKeyActions (C:\Users\pc\Desktop\My Projects\NeoLoop\src\core\keys.ts:72:23)
+    at parseKeyActions (C:\Users\pc\Desktop\My Projects\NeoLoop\src\core\keys.ts:72:23)
+    at parseKeyActions (C:\Users\pc\Desktop\My Projects\NeoLoop\src\core\keys.ts:72:23)
+    at parseKeyActions (C:\Users\pc\Desktop\My Projects\NeoLoop\src\core\keys.ts:72:23)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -101,35 +101,47 @@ function InputBar({ value, showPlaceholder, cols, isSelectedAll }: InputBarProps
   const promptCol = theme.userTalk?.prompt || theme.accent;
   const userTextCol = theme.userTalk?.text || theme.inputText;
 
+  const rawLines = value.split('\n');
+  const MAX_VISIBLE = 10;
+  const isScrollable = rawLines.length > MAX_VISIBLE;
+  const startIdx = isScrollable ? rawLines.length - MAX_VISIBLE : 0;
+  const visibleLines = rawLines.slice(startIdx);
+
   return (
     <Box flexDirection="column">
       {/* ── top dashed border ── */}
       <Box paddingLeft={1} paddingRight={1}>
-        <Text color={borderCol}>{dashedRule}</Text>
+        <Text color={borderCol}>
+          {startIdx > 0 ? `-[▲ ${startIdx} line${startIdx > 1 ? 's' : ''} above]`.padEnd(ruleWidth, '-') : dashedRule}
+        </Text>
       </Box>
 
-      {/* ── prompt row: > [placeholder OR typed text][cursor] ── */}
-      <Box flexDirection="row" paddingLeft={2} paddingRight={1}>
-        <Text color={promptCol} bold>{'> '}</Text>
-
-        {showPlaceholder ? (
-          <>
-            <Text color={theme.inputPlaceholder}>{placeholder}</Text>
-            <BlinkingCursor />
-          </>
-        ) : (
-          <>
-            {isSelectedAll ? (
-              <Text backgroundColor={theme.selection} color={theme.text} bold>
-                {value}
-              </Text>
-            ) : (
-              <Text color={userTextCol}>{value}</Text>
-            )}
-            <BlinkingCursor />
-          </>
-        )}
-      </Box>
+      {/* ── prompt rows ── */}
+      {showPlaceholder ? (
+        <Box flexDirection="row" paddingLeft={2} paddingRight={1}>
+          <Text color={promptCol} bold>{'> '}</Text>
+          <Text color={theme.inputPlaceholder}>{placeholder}</Text>
+          <BlinkingCursor />
+        </Box>
+      ) : (
+        visibleLines.map((line, idx) => {
+          const isFirst = (startIdx + idx) === 0;
+          const isLast = idx === visibleLines.length - 1;
+          return (
+            <Box key={idx} flexDirection="row" paddingLeft={2} paddingRight={1}>
+              <Text color={promptCol} bold>{isFirst ? '> ' : '  '}</Text>
+              {isSelectedAll ? (
+                <Text backgroundColor={theme.selection} color={theme.text} bold>
+                  {line}
+                </Text>
+              ) : (
+                <Text color={userTextCol}>{line}</Text>
+              )}
+              {isLast && <BlinkingCursor />}
+            </Box>
+          );
+        })
+      )}
 
       {/* ── bottom dashed border ── */}
       <Box paddingLeft={1} paddingRight={1}>
