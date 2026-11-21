@@ -30,8 +30,6 @@ import {
   saveThemeId,
   getThemeDisplayNameColor,
   lerpColor,
-  loadSavedMouseEnabled,
-  saveMouseEnabled,
 } from './themes.js';
 import { COMMAND_REGISTRY, SlashCommand, CommandContext } from './commands.js';
 import { parseKeyActions, KeyAction } from './keys.js';
@@ -488,6 +486,64 @@ export function runSplash({
     let inputScrollTop = 0;
     let barHeight = 1;
     let isSelectedAll = false;  // Ctrl+A selection state
+    let selection: { start: number; end: number } | null = null;
+    let dragAnchorIdx: number | null = null;
+    let lastLeftClickTime = 0;
+    let lastLeftClickX = 0;
+    let lastLeftClickY = 0;
+
+    function clearSelection() {
+      selection = null;
+      isSelectedAll = false;
+    }
+
+    function setSelection(start: number, end: number) {
+      const s = Math.max(0, Math.min(start, inputBuffer.length));
+      const e = Math.max(s, Math.min(end, inputBuffer.length));
+      if (s === e) {
+        selection = null;
+        isSelectedAll = false;
+      } else {
+        selection = { start: s, end: e };
+        isSelectedAll = (s === 0 && e === inputBuffer.length);
+      }
+    }
+
+    function getBufferIdxAt(x: number, y: number): number {
+      if (inputBuffer.length === 0) return 0;
+      const inputContentStartY = streamH + 1;
+      const inputContentEndY = streamH + barHeight;
+
+      const textCols = Math.max(1, W - 7);
+      const { rows: vRows } = getVisualInputRows(textCols);
+      if (vRows.length === 0) return 0;
+
+      let visualRowIdx = 0;
+      if (y < inputContentStartY) {
+        if (inputScrollTop > 0) {
+          inputScrollTop = Math.max(0, inputScrollTop - 1);
+        }
+        visualRowIdx = inputScrollTop;
+      } else if (y > inputContentEndY) {
+        if (inputScrollTop + barHeight < vRows.length) {
+          inputScrollTop = Math.min(vRows.length - barHeight, inputScrollTop + 1);
+        }
+        visualRowIdx = Math.min(vRows.length - 1, inputScrollTop + barHeight - 1);
+      } else {
+        const rowOffset = y - inputContentStartY;
+        visualRowIdx = Math.max(0, Math.min(vRows.length - 1, inputScrollTop + rowOffset));
+      }
+
+      const vRow = vRows[visualRowIdx]!;
+      const textStartX = 4;
+      const colOffset = x - textStartX;
+
+      if (colOffset <= 0) {
+        return vRow.startIdx;
+      }
+      const clampedCol = Math.min(colOffset, vRow.text.length);
+      return vRow.startIdx + clampedCol;
+    }
     let cursorOn = true;
     let cursorTimer: NodeJS.Timeout | undefined;
 
@@ -501,18 +557,6 @@ export function runSplash({
     let followTail = true;
     let linesWhenLeftTail = 0;
     let lastScrollActivityTime = Date.now();
-    let mouseEnabled = loadSavedMouseEnabled();
-
-    function setMouseMode(enabled: boolean) {
-      mouseEnabled = enabled;
-      if (running) {
-        if (mouseEnabled) {
-          out.write('\x1b[?1000h\x1b[?1002h\x1b[?1006h');
-        } else {
-          out.write('\x1b[?1000l\x1b[?1002l\x1b[?1006l');
-        }
-      }
-    }
 
     function updateScroll(newTop: number) {
       const vRows = Math.max(0, H - (streamH + barHeight + 2));
@@ -606,15 +650,12 @@ export function runSplash({
     // ── Context menu state ───────────────────────────────────────────────────
     interface ContextMenuItem {
       label: string;
-      shortcut: string;
       action: 'copy' | 'paste' | 'cut' | 'clear' | 'selectAll';
     }
     const CONTEXT_MENU_ITEMS: ContextMenuItem[] = [
-      { label: 'Copy',       shortcut: 'Ctrl+C', action: 'copy'      },
-      { label: 'Paste',      shortcut: 'Ctrl+V', action: 'paste'     },
-      { label: 'Cut',        shortcut: 'Ctrl+X', action: 'cut'       },
-      { label: 'Select All', shortcut: 'Ctrl+A', action: 'selectAll' },
-      { label: 'Clear',      shortcut: 'Esc',    action: 'clear'     },
+      { label: 'Copy',       action: 'copy'      },
+      { label: 'Paste',      action: 'paste'     },
+      { label: 'Cut',        action: 'cut'       },
     ];
     let contextMenuX = 0;      // terminal column (0-based)
     let contextMenuY = 0;      // terminal row    (0-based)
@@ -1018,18 +1059,35 @@ export function runSplash({
             writeRow(rowY, 2, '  ', '');
           }
 
-          if (isSelectedAll) {
-            // ── Selection highlight: entire buffer selected ──────────────────
-            const displayText = rowText.padEnd(Math.min(rowText.length + 1, textCols));
-            for (let k = 0; k < displayText.length && textStartX + k < W - 2; k++) {
-              setCell(rowY, textStartX + k, displayText[k]!, `BG:${selBg};FG:${selFg};BOLD`);
+          const selStart = selection ? selection.start : -1;
+          const selEnd   = selection ? selection.end   : -1;
+          const hasSel   = selStart >= 0 && selEnd > selStart;
+          const rowHasSel = hasSel && selStart < vRow.endIdx && selEnd > vRow.startIdx;
+
+          if (rowHasSel) {
+            // ── Selection highlight for this visual row ─────────────────────
+            for (let k = 0; k < rowText.length && textStartX + k < W - 2; k++) {
+              const charIdx = vRow.startIdx + k;
+              const isCharSelected = charIdx >= selStart && charIdx < selEnd;
+              if (isCharSelected) {
+                setCell(rowY, textStartX + k, rowText[k]!, `BG:${selBg};FG:${selFg};BOLD`);
+              } else {
+                setCell(rowY, textStartX + k, rowText[k]!, userTextCol);
+              }
+            }
+            // If whole visual row is selected, highlight trailing space
+            if (selStart <= vRow.startIdx && selEnd >= vRow.endIdx) {
+              const padLen = Math.min(rowText.length + 1, textCols);
+              for (let k = rowText.length; k < padLen && textStartX + k < W - 2; k++) {
+                setCell(rowY, textStartX + k, ' ', `BG:${selBg};FG:${selFg};BOLD`);
+              }
             }
           } else {
             // ── Normal text rendering ────────────────────────────────────────
             writeRow(rowY, textStartX, rowText, userTextCol);
 
-            // ── Cursor (only on the row that contains the cursor) ─────────────
-            if (r === cursorRowVisible) {
+            // ── Cursor (only on the row that contains the cursor, when not selected) ─
+            if (r === cursorRowVisible && !hasSel) {
               const curX = textStartX + cursorCol;
               if (curX < W - 2) {
                 if (cursorCol < rowText.length) {
@@ -1384,7 +1442,8 @@ export function runSplash({
     function paintContextMenu() {
       if (mode !== 'contextMenu') return;
 
-      const MENU_INNER_WIDTH = 24;
+      // Compact professional width: '> ' + ' ' + 'Paste' + '   ' = 10 inner chars (12 box width)
+      const MENU_INNER_WIDTH = 10;
       const BOX_WIDTH = MENU_INNER_WIDTH + 2;
       const MENU_HEIGHT = CONTEXT_MENU_ITEMS.length + 2;
 
@@ -1392,9 +1451,9 @@ export function runSplash({
       const mx = Math.max(0, Math.min(contextMenuX, W - BOX_WIDTH));
       const my = Math.max(0, Math.min(contextMenuY, H - MENU_HEIGHT));
 
-      // ── Derive perfectly-themed colors from the live theme ────────────────
+      // ── Derive colors — theme-matched border ─────────────────────────────
       const panelBg   = theme.surfaceElevated || theme.surface || '#12131a';
-      const borderCol = theme.inputBorder || theme.accent || theme.border;
+      const borderCol = theme.inputBorder || theme.border;
       const selBg     = theme.selection || theme.accent;
 
       // High-contrast selection text
@@ -1407,10 +1466,7 @@ export function runSplash({
         selFg = '#ffffff';
       }
 
-      const itemFg     = theme.text || '#f0f0f0';
-      const shortcutFg = theme.textMuted || theme.accent;
-      const titleFg    = theme.accent || '#ffffff';
-      const hintFg     = theme.textMuted || theme.accent;
+      const itemFg = theme.text || '#f0f0f0';
 
       // ── 1) Paint a solid background slab first (clear previous content) ───
       for (let row = 0; row < MENU_HEIGHT; row++) {
@@ -1419,24 +1475,13 @@ export function runSplash({
         }
       }
 
-      // ── 2) Top border with "Clipboard" title: ┌─ Clipboard ────────────┐ ──
-      const title = ' Clipboard ';
-      const topDashes = Math.max(1, BOX_WIDTH - 2 - title.length - 1);
-      const topBorder = '┌─' + title + '─'.repeat(topDashes) + '┐';
+      // ── 2) Top border: ┌──────────┐ ──────────────────────────────────────
+      const topBorder = '┌' + '─'.repeat(MENU_INNER_WIDTH) + '┐';
       for (let k = 0; k < topBorder.length && mx + k < W; k++) {
-        const ch = topBorder[k]!;
-        const isTitleChar = k >= 2 && k < 2 + title.length;
-        setCell(
-          my,
-          mx + k,
-          ch,
-          isTitleChar
-            ? `BG:${panelBg};FG:${titleFg};BOLD`
-            : `BG:${panelBg};FG:${borderCol}`
-        );
+        setCell(my, mx + k, topBorder[k]!, `BG:${panelBg};FG:${borderCol}`);
       }
 
-      // ── 3) Item rows: │ > Copy          Ctrl+C │ ──────────────────────────
+      // ── 3) Item rows: │ > Label            │ ───────────────────────────
       for (let i = 0; i < CONTEXT_MENU_ITEMS.length; i++) {
         const item = CONTEXT_MENU_ITEMS[i]!;
         const rowY = my + 1 + i;
@@ -1444,56 +1489,28 @@ export function runSplash({
 
         const rowBg = isSelected ? selBg : panelBg;
         const ptr = isSelected ? '>' : ' ';
-        const shortcut = item.shortcut || '';
-        const rightMargin = ' ';
-        const spaceCount = Math.max(
-          1,
-          MENU_INNER_WIDTH - 2 - item.label.length - shortcut.length - rightMargin.length
-        );
+        // Padding: fill remaining inner width after '> ' + ' ' + label + ' '
+        const padCount = Math.max(1, MENU_INNER_WIDTH - 1 - 1 - 1 - item.label.length - 1);
 
         // Left border
         setCell(rowY, mx, '│', `BG:${panelBg};FG:${borderCol}`);
 
-        // Pointer: '>' or ' '
-        setCell(
-          rowY,
-          mx + 1,
-          ptr,
-          isSelected ? `BG:${rowBg};FG:${selFg};BOLD` : `BG:${rowBg};FG:${itemFg}`
-        );
-        // Space
+        // Pointer
+        setCell(rowY, mx + 1, ptr,
+          isSelected ? `BG:${rowBg};FG:${selFg};BOLD` : `BG:${rowBg};FG:${itemFg}`);
+        // Space after pointer
         setCell(rowY, mx + 2, ' ', `BG:${rowBg};FG:${itemFg}`);
 
         // Label
         let curCol = mx + 3;
         for (let k = 0; k < item.label.length && curCol < W; k++, curCol++) {
-          setCell(
-            rowY,
-            curCol,
-            item.label[k]!,
-            isSelected ? `BG:${rowBg};FG:${selFg};BOLD` : `BG:${rowBg};FG:${itemFg}`
-          );
+          setCell(rowY, curCol, item.label[k]!,
+            isSelected ? `BG:${rowBg};FG:${selFg};BOLD` : `BG:${rowBg};FG:${itemFg}`);
         }
 
-        // Filler spaces
-        for (let k = 0; k < spaceCount && curCol < W; k++, curCol++) {
-          setCell(rowY, curCol, ' ', `BG:${rowBg};FG:${itemFg}`);
-        }
-
-        // Shortcut
-        for (let k = 0; k < shortcut.length && curCol < W; k++, curCol++) {
-          setCell(
-            rowY,
-            curCol,
-            shortcut[k]!,
-            isSelected
-              ? `BG:${rowBg};FG:${selFg};BOLD`
-              : `BG:${rowBg};FG:${shortcutFg}`
-          );
-        }
-
-        // Trailing margin
-        for (let k = 0; k < rightMargin.length && curCol < W; k++, curCol++) {
+        // Trailing spaces (fills to right border)
+        const fillEnd = mx + BOX_WIDTH - 1;
+        for (; curCol < fillEnd && curCol < W; curCol++) {
           setCell(rowY, curCol, ' ', `BG:${rowBg};FG:${itemFg}`);
         }
 
@@ -1504,44 +1521,40 @@ export function runSplash({
         }
       }
 
-      // ── 4) Bottom border with hint: └────── enter·esc ───────┘ ────────────
-      const hintText = ' enter·esc ';
-      const leftDashes = Math.max(1, Math.floor((MENU_INNER_WIDTH - hintText.length) / 2));
-      const rightDashes = Math.max(1, MENU_INNER_WIDTH - hintText.length - leftDashes);
-      const bottomBorder = '└' + '─'.repeat(leftDashes) + hintText + '─'.repeat(rightDashes) + '┘';
+      // ── 4) Bottom border: └────────────────┘ ────────────────────────────
+      const bottomBorder = '└' + '─'.repeat(MENU_INNER_WIDTH) + '┘';
       const botY = my + MENU_HEIGHT - 1;
 
       for (let k = 0; k < bottomBorder.length && mx + k < W; k++) {
-        const ch = bottomBorder[k]!;
-        const isHintChar = k > leftDashes && k <= leftDashes + hintText.length;
-        setCell(
-          botY,
-          mx + k,
-          ch,
-          isHintChar
-            ? `BG:${panelBg};FG:${hintFg}`
-            : `BG:${panelBg};FG:${borderCol}`
-        );
+        setCell(botY, mx + k, bottomBorder[k]!, `BG:${panelBg};FG:${borderCol}`);
       }
     }
 
     // ── Execute a context menu action ────────────────────────────────────────
     function executeContextMenuAction(action: string) {
       mode = prevMode;
-      isSelectedAll = false;
+      historyIndex = -1;
+
+      const hasSel = selection !== null && selection.start < selection.end;
+      const selStart = hasSel ? selection!.start : 0;
+      const selEnd = hasSel ? selection!.end : inputBuffer.length;
+      const targetText = inputBuffer.slice(selStart, selEnd);
+
       switch (action) {
         case 'copy':
-          if (inputBuffer) {
-            copyToClipboard(inputBuffer);
+          if (targetText) {
+            copyToClipboard(targetText);
             logBuffer.log('Copied to clipboard');
           }
+          clearSelection();
           break;
         case 'cut':
-          if (inputBuffer) {
-            copyToClipboard(inputBuffer);
-            inputBuffer = '';
-            cursorIdx   = 0;
-            inputScrollTop = 0;
+          if (targetText) {
+            copyToClipboard(targetText);
+            inputBuffer = inputBuffer.slice(0, selStart) + inputBuffer.slice(selEnd);
+            cursorIdx = selStart;
+            clearSelection();
+            autoScrollToCursor();
             logBuffer.log('Cut to clipboard');
           }
           break;
@@ -1549,8 +1562,9 @@ export function runSplash({
           readFromClipboard().then(text => {
             if (text) {
               const clean = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
-              inputBuffer = inputBuffer.slice(0, cursorIdx) + clean + inputBuffer.slice(cursorIdx);
-              cursorIdx  += clean.length;
+              inputBuffer = inputBuffer.slice(0, selStart) + clean + inputBuffer.slice(selEnd);
+              cursorIdx = selStart + clean.length;
+              clearSelection();
               autoScrollToCursor();
               if (inputBuffer.startsWith('/') && !inputBuffer.includes('\n')) {
                 mode = 'slashMenu';
@@ -1562,7 +1576,7 @@ export function runSplash({
           break;
         case 'selectAll':
           if (inputBuffer.length > 0) {
-            isSelectedAll = true;
+            setSelection(0, inputBuffer.length);
             cursorIdx = inputBuffer.length;
           }
           break;
@@ -1570,6 +1584,7 @@ export function runSplash({
           inputBuffer = '';
           cursorIdx   = 0;
           inputScrollTop = 0;
+          clearSelection();
           break;
       }
       autoScrollToCursor();
@@ -1692,8 +1707,8 @@ export function runSplash({
       process.off('SIGTERM', onSigTerm);
       process.off('uncaughtException', onUncaught);
 
-      // Restore terminal: disable bracketed paste, mouse tracking off, show cursor, exit alt screen
-      out.write('\x1b[?2004l\x1b[?1000l\x1b[?1002l\x1b[?1006l\x1b[0m\x1b[?25h\x1b[?1049l');
+      // Restore terminal: pop Kitty keyboard protocol, disable modifyOtherKeys, disable bracketed paste, mouse tracking off (full + X10), show cursor, exit alt screen
+      out.write('\x1b[<u\x1b[>4;0m\x1b[?2004l\x1b[?1000l\x1b[?1002l\x1b[?1006l\x1b[?9l\x1b[0m\x1b[?25h\x1b[?1049l');
       try {
         inp.setRawMode(false);
       } catch {
@@ -1716,19 +1731,9 @@ export function runSplash({
         filterQuery = '';
         mode = 'themePicker';
       },
-      toggleMouse: (arg?: string) => {
-        const lower = arg?.trim().toLowerCase();
-        let next = !mouseEnabled;
-        if (lower === 'on') next = true;
-        if (lower === 'off') next = false;
-        setMouseMode(next);
-        saveMouseEnabled(next);
-        logBuffer.log(`Mouse wheel scrolling ${next ? 'enabled' : 'disabled'}`);
-      },
       showHelp: () => {
         logBuffer.log('Commands:');
         logBuffer.log('  /theme    Change color theme');
-        logBuffer.log('  /mouse    Toggle mouse wheel scrolling (on|off)');
         logBuffer.log('  /help     Show commands and shortcuts');
         logBuffer.log('  /clear    Clear the output log');
         logBuffer.log('  /exit     Quit NeoLoop');
@@ -1764,11 +1769,13 @@ export function runSplash({
 
     // ── Key Event Dispatcher ─────────────────────────────────────────────────
     function handleKeyAction(action: KeyAction) {
-      // Ctrl-C: copy text when input has content; otherwise exit cleanly
+      // Ctrl-C: copy selected text (or full buffer) if input active; quit only if input empty
       if (action.type === 'ctrl-c') {
         if (inputBuffer.length > 0 && (mode === 'input' || mode === 'slashMenu')) {
-          copyToClipboard(inputBuffer);
-          isSelectedAll = false;
+          const hasSel = selection !== null && selection.start < selection.end;
+          const target = hasSel ? inputBuffer.slice(selection!.start, selection!.end) : inputBuffer;
+          copyToClipboard(target);
+          clearSelection();
           return;
         }
         cleanup();
@@ -1778,26 +1785,25 @@ export function runSplash({
       // Ctrl-A: select all text in input buffer
       if (action.type === 'ctrl-a') {
         if (inputBuffer.length > 0 && (mode === 'input' || mode === 'slashMenu')) {
-          isSelectedAll = true;
+          setSelection(0, inputBuffer.length);
           cursorIdx = inputBuffer.length;
         }
         return;
       }
 
-      // Ctrl-V: paste from OS clipboard into input
+      // Ctrl-V: paste from OS clipboard into input (replaces selection if active)
       if (action.type === 'ctrl-v') {
+        historyIndex = -1;
         if (mode === 'input' || mode === 'slashMenu') {
           readFromClipboard().then(text => {
             if (text) {
               const clean = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
-              if (isSelectedAll) {
-                inputBuffer = clean;
-                cursorIdx = clean.length;
-                isSelectedAll = false;
-              } else {
-                inputBuffer = inputBuffer.slice(0, cursorIdx) + clean + inputBuffer.slice(cursorIdx);
-                cursorIdx += clean.length;
-              }
+              const hasSel = selection !== null && selection.start < selection.end;
+              const selStart = hasSel ? selection!.start : cursorIdx;
+              const selEnd   = hasSel ? selection!.end   : cursorIdx;
+              inputBuffer = inputBuffer.slice(0, selStart) + clean + inputBuffer.slice(selEnd);
+              cursorIdx = selStart + clean.length;
+              clearSelection();
               autoScrollToCursor();
               if (inputBuffer.startsWith('/') && !inputBuffer.includes('\n')) {
                 mode = 'slashMenu';
@@ -1805,19 +1811,25 @@ export function runSplash({
               } else {
                 mode = 'input';
               }
+              draw();
             }
           });
         }
         return;
       }
 
-      // Ctrl-X: cut (copy + clear)
+      // Ctrl-X: cut selected text (or full buffer)
       if (action.type === 'ctrl-x') {
+        historyIndex = -1;
         if (inputBuffer.length > 0 && (mode === 'input' || mode === 'slashMenu')) {
-          copyToClipboard(inputBuffer);
-          inputBuffer = '';
-          cursorIdx = 0;
-          isSelectedAll = false;
+          const hasSel = selection !== null && selection.start < selection.end;
+          const selStart = hasSel ? selection!.start : 0;
+          const selEnd   = hasSel ? selection!.end   : inputBuffer.length;
+          const target = inputBuffer.slice(selStart, selEnd);
+          copyToClipboard(target);
+          inputBuffer = inputBuffer.slice(0, selStart) + inputBuffer.slice(selEnd);
+          cursorIdx = selStart;
+          clearSelection();
           mode = 'input';
         }
         return;
@@ -1825,28 +1837,15 @@ export function runSplash({
 
       // ── Mouse click handling ────────────────────────────────────────────────
       if (action.type === 'left-click' || action.type === 'right-click') {
-        // If all text was selected (via Ctrl+A), clicking anywhere unselects it (like real editors)
-        if (isSelectedAll) {
-          isSelectedAll = false;
-        }
-
         // If context menu is active: handle item click or dismiss
         if (mode === 'contextMenu') {
-          const MENU_INNER_WIDTH = 24;
+          const MENU_INNER_WIDTH = 10;
           const BOX_WIDTH = MENU_INNER_WIDTH + 2;
           const MENU_HEIGHT = CONTEXT_MENU_ITEMS.length + 2;
           const mx = Math.max(0, Math.min(contextMenuX, W - BOX_WIDTH));
           const my = Math.max(0, Math.min(contextMenuY, H - MENU_HEIGHT));
 
-          // Right click while menu is open: re-position menu if clicked outside
-          if (action.type === 'right-click') {
-            contextMenuX = action.x;
-            contextMenuY = action.y;
-            contextMenuSelectedIndex = 0;
-            draw();
-            return;
-          }
-
+          // Clicked on a menu item
           if (
             action.x >= mx &&
             action.x < mx + BOX_WIDTH &&
@@ -1860,19 +1859,50 @@ export function runSplash({
               return;
             }
           }
+
+          // Right-click while menu is open: re-position menu if inside input bar
+          if (action.type === 'right-click') {
+            const isInsideInputBar =
+              inputVisible &&
+              action.y >= streamH &&
+              action.y <= streamH + 1 + barHeight &&
+              action.x >= 0 &&
+              action.x < W;
+
+            if (isInsideInputBar) {
+              contextMenuX = action.x;
+              contextMenuY = action.y;
+              contextMenuSelectedIndex = 0;
+              draw();
+              return;
+            }
+          }
+
+          // Clicked outside menu (or right-clicked outside input bar) -> close menu
           mode = prevMode;
           draw();
           return;
         }
 
-        // Right-click: open context menu at click location
+        // Right-click: open context menu ONLY if text has been selected first (or buffer is empty for paste)
         if (action.type === 'right-click') {
-          prevMode = mode;
-          mode = 'contextMenu';
-          contextMenuX = action.x;
-          contextMenuY = action.y;
-          contextMenuSelectedIndex = 0;
-          draw();
+          const isInsideInputBar =
+            inputVisible &&
+            action.y >= streamH &&
+            action.y <= streamH + 1 + barHeight &&
+            action.x >= 0 &&
+            action.x < W;
+
+          const hasSelection = (selection !== null && selection.start < selection.end) || isSelectedAll;
+
+          if (isInsideInputBar && (hasSelection || inputBuffer.length === 0)) {
+            prevMode = mode;
+            mode = 'contextMenu';
+            contextMenuX = action.x;
+            contextMenuY = action.y;
+            contextMenuSelectedIndex = 0;
+            draw();
+          }
           return;
         }
 
@@ -1918,30 +1948,85 @@ export function runSplash({
             mode = 'input';
           }
 
-          // If clicked inside input bar rows, place cursor at the clicked position (like real editors)
+          // Left-click inside input bar: start drag selection or word selection
           const inputContentStartY = streamH + 1;
           const inputContentEndY = streamH + barHeight;
           if (action.y >= inputContentStartY && action.y <= inputContentEndY) {
-            const textCols = Math.max(1, W - 7);
-            const { rows: vRows } = getVisualInputRows(textCols);
-            const rowOffset = action.y - inputContentStartY;
-            const targetVisualRowIdx = inputScrollTop + rowOffset;
-            if (targetVisualRowIdx >= 0 && targetVisualRowIdx < vRows.length) {
-              const vRow = vRows[targetVisualRowIdx]!;
-              const textStartX = 4;
-              const colOffset = action.x - textStartX;
-              if (colOffset <= 0) {
-                cursorIdx = vRow.startIdx;
-              } else {
-                const clampedCol = Math.min(colOffset, vRow.text.length);
-                cursorIdx = vRow.startIdx + clampedCol;
+            const idx = getBufferIdxAt(action.x, action.y);
+            cursorIdx = idx;
+            autoScrollToCursor();
+
+            const now = Date.now();
+            const isDoubleClick =
+              now - lastLeftClickTime < 350 &&
+              Math.abs(action.x - lastLeftClickX) <= 1 &&
+              Math.abs(action.y - lastLeftClickY) === 0;
+
+            lastLeftClickTime = now;
+            lastLeftClickX = action.x;
+            lastLeftClickY = action.y;
+
+            if (isDoubleClick && inputBuffer.length > 0) {
+              // Double click: select word at cursor
+              let wStart = Math.min(idx, inputBuffer.length - 1);
+              if (wStart < 0) wStart = 0;
+              while (wStart > 0 && /\w/.test(inputBuffer[wStart - 1]!)) {
+                wStart--;
               }
-              autoScrollToCursor();
+              let wEnd = idx;
+              while (wEnd < inputBuffer.length && /\w/.test(inputBuffer[wEnd]!)) {
+                wEnd++;
+              }
+              if (wEnd > wStart) {
+                setSelection(wStart, wEnd);
+                cursorIdx = wEnd;
+              } else {
+                clearSelection();
+              }
+              dragAnchorIdx = null;
+            } else {
+              // Single left-click: place cursor and set anchor for drag across X and Y
+              dragAnchorIdx = idx;
+              clearSelection();
             }
+          } else {
+            // Clicked outside input bar content -> unselect
+            dragAnchorIdx = null;
+            clearSelection();
           }
         }
 
         draw();
+        return;
+      }
+
+      // ── Mouse drag & release (freeform text selection across X and Y) ─────────
+      if (action.type === 'mouse-drag') {
+        if (dragAnchorIdx !== null && (mode === 'input' || mode === 'slashMenu')) {
+          const curIdx = getBufferIdxAt(action.x, action.y);
+          cursorIdx = curIdx;
+          if (curIdx !== dragAnchorIdx) {
+            setSelection(Math.min(dragAnchorIdx, curIdx), Math.max(dragAnchorIdx, curIdx));
+          } else {
+            clearSelection();
+          }
+          autoScrollToCursor();
+          draw();
+        }
+        return;
+      }
+
+      if (action.type === 'mouse-up') {
+        if (dragAnchorIdx !== null) {
+          const curIdx = getBufferIdxAt(action.x, action.y);
+          if (curIdx !== dragAnchorIdx) {
+            setSelection(Math.min(dragAnchorIdx, curIdx), Math.max(dragAnchorIdx, curIdx));
+            cursorIdx = curIdx;
+          }
+          dragAnchorIdx = null;
+          autoScrollToCursor();
+          draw();
+        }
         return;
       }
 
@@ -2285,7 +2370,6 @@ export function runSplash({
       }
 
       if (action.type === 'wheel-up') {
-        if (!mouseEnabled) return;
         const textCols = Math.max(1, W - 7);
         const { rows: vRows } = getVisualInputRows(textCols);
 
@@ -2306,7 +2390,6 @@ export function runSplash({
       }
 
       if (action.type === 'wheel-down') {
-        if (!mouseEnabled) return;
         const textCols = Math.max(1, W - 7);
         const { rows: vRows } = getVisualInputRows(textCols);
         const maxInputScroll = Math.max(0, vRows.length - barHeight);
@@ -2328,8 +2411,8 @@ export function runSplash({
       }
 
       if (action.type === 'esc') {
-        if (isSelectedAll) {
-          isSelectedAll = false;
+        if (selection || isSelectedAll) {
+          clearSelection();
           return;
         }
         // Esc clears the line
@@ -2342,21 +2425,21 @@ export function runSplash({
       }
 
       if (action.type === 'left') {
-        isSelectedAll = false;
+        clearSelection();
         cursorIdx = Math.max(0, cursorIdx - 1);
         autoScrollToCursor();
         return;
       }
 
       if (action.type === 'right') {
-        isSelectedAll = false;
+        clearSelection();
         cursorIdx = Math.min(inputBuffer.length, cursorIdx + 1);
         autoScrollToCursor();
         return;
       }
 
       if (action.type === 'home') {
-        isSelectedAll = false;
+        clearSelection();
         const textCols = Math.max(1, W - 7);
         const { rows: vRows, cursorRow } = getVisualInputRows(textCols);
         const curRow = vRows[cursorRow];
@@ -2378,7 +2461,7 @@ export function runSplash({
           requestScrollRepaint();
           return;
         }
-        isSelectedAll = false;
+        clearSelection();
         const textCols = Math.max(1, W - 7);
         const { rows: vRows, cursorRow } = getVisualInputRows(textCols);
         const curRow = vRows[cursorRow];
@@ -2391,10 +2474,18 @@ export function runSplash({
       }
 
       if (action.type === 'delete') {
+        historyIndex = -1;
+        if (selection && selection.start < selection.end) {
+          inputBuffer = inputBuffer.slice(0, selection.start) + inputBuffer.slice(selection.end);
+          cursorIdx = selection.start;
+          clearSelection();
+          autoScrollToCursor();
+          return;
+        }
         if (isSelectedAll) {
           inputBuffer = '';
           cursorIdx = 0;
-          isSelectedAll = false;
+          clearSelection();
           inputScrollTop = 0;
           return;
         }
@@ -2406,10 +2497,18 @@ export function runSplash({
       }
 
       if (action.type === 'backspace') {
+        historyIndex = -1;
+        if (selection && selection.start < selection.end) {
+          inputBuffer = inputBuffer.slice(0, selection.start) + inputBuffer.slice(selection.end);
+          cursorIdx = selection.start;
+          clearSelection();
+          autoScrollToCursor();
+          return;
+        }
         if (isSelectedAll) {
           inputBuffer = '';
           cursorIdx = 0;
-          isSelectedAll = false;
+          clearSelection();
           inputScrollTop = 0;
           return;
         }
@@ -2422,7 +2521,7 @@ export function runSplash({
       }
 
       if (action.type === 'up') {
-        isSelectedAll = false;
+        clearSelection();
         const textCols = Math.max(1, W - 7);
         const { rows: vRows, cursorRow, cursorCol } = getVisualInputRows(textCols);
 
@@ -2434,28 +2533,40 @@ export function runSplash({
           if (cursorRow - 1 < inputScrollTop) {
             inputScrollTop = cursorRow - 1;
           }
+          autoScrollToCursor();
           return;
         }
 
-        // Browse command history backwards
+        // When in user input bar on the top row, stay in current prompt instead of jumping to history
+        if (inputBuffer.length > 0 && historyIndex === -1) {
+          cursorIdx = 0;
+          inputScrollTop = 0;
+          return;
+        }
+
+        // Browse command history backwards only when input is empty or already browsing history
         if (commandHistory.length > 0) {
-          if (historyIndex === -1) {
-            savedDraft = inputBuffer;
+          if (historyIndex === -1 && inputBuffer.length === 0) {
+            savedDraft = '';
             historyIndex = commandHistory.length - 1;
           } else if (historyIndex > 0) {
             historyIndex--;
+          } else if (historyIndex === 0) {
+            return;
+          } else {
+            return;
           }
           if (historyIndex >= 0 && historyIndex < commandHistory.length) {
             inputBuffer = commandHistory[historyIndex]!;
             cursorIdx = inputBuffer.length;
-            inputScrollTop = 0;
+            autoScrollToCursor();
           }
         }
         return;
       }
 
       if (action.type === 'down') {
-        isSelectedAll = false;
+        clearSelection();
         const textCols = Math.max(1, W - 7);
         const { rows: vRows, cursorRow, cursorCol } = getVisualInputRows(textCols);
 
@@ -2467,6 +2578,14 @@ export function runSplash({
           if (cursorRow + 1 >= inputScrollTop + barHeight) {
             inputScrollTop = cursorRow + 1 - barHeight + 1;
           }
+          autoScrollToCursor();
+          return;
+        }
+
+        // When on the bottom row of current prompt, stay in current prompt (move to end)
+        if (inputBuffer.length > 0 && historyIndex === -1) {
+          cursorIdx = inputBuffer.length;
+          autoScrollToCursor();
           return;
         }
 
@@ -2481,16 +2600,21 @@ export function runSplash({
             inputBuffer = commandHistory[historyIndex]!;
             cursorIdx = inputBuffer.length;
           }
-          inputScrollTop = 0;
+          autoScrollToCursor();
         }
         return;
       }
 
       if (action.type === 'newline') {
-        if (isSelectedAll) {
+        historyIndex = -1;
+        if (selection && selection.start < selection.end) {
+          inputBuffer = inputBuffer.slice(0, selection.start) + '\n' + inputBuffer.slice(selection.end);
+          cursorIdx = selection.start + 1;
+          clearSelection();
+        } else if (isSelectedAll) {
           inputBuffer = '\n';
           cursorIdx = 1;
-          isSelectedAll = false;
+          clearSelection();
         } else {
           inputBuffer = inputBuffer.slice(0, cursorIdx) + '\n' + inputBuffer.slice(cursorIdx);
           cursorIdx++;
@@ -2501,11 +2625,16 @@ export function runSplash({
       }
 
       if (action.type === 'paste') {
+        historyIndex = -1;
         const pasteText = action.text;
-        if (isSelectedAll) {
+        if (selection && selection.start < selection.end) {
+          inputBuffer = inputBuffer.slice(0, selection.start) + pasteText + inputBuffer.slice(selection.end);
+          cursorIdx = selection.start + pasteText.length;
+          clearSelection();
+        } else if (isSelectedAll) {
           inputBuffer = pasteText;
           cursorIdx = pasteText.length;
-          isSelectedAll = false;
+          clearSelection();
         } else {
           inputBuffer = inputBuffer.slice(0, cursorIdx) + pasteText + inputBuffer.slice(cursorIdx);
           cursorIdx += pasteText.length;
@@ -2519,10 +2648,15 @@ export function runSplash({
       }
 
       if (action.type === 'char') {
-        if (isSelectedAll) {
+        historyIndex = -1;
+        if (selection && selection.start < selection.end) {
+          inputBuffer = inputBuffer.slice(0, selection.start) + action.char + inputBuffer.slice(selection.end);
+          cursorIdx = selection.start + action.char.length;
+          clearSelection();
+        } else if (isSelectedAll) {
           inputBuffer = action.char;
           cursorIdx = 1;
-          isSelectedAll = false;
+          clearSelection();
         } else {
           inputBuffer = inputBuffer.slice(0, cursorIdx) + action.char + inputBuffer.slice(cursorIdx);
           cursorIdx += action.char.length;
@@ -2536,7 +2670,7 @@ export function runSplash({
       }
 
       if (action.type === 'enter') {
-        isSelectedAll = false;
+        clearSelection();
         const trimmed = inputBuffer.trim();
         inputBuffer = '';
         cursorIdx = 0;
@@ -2552,12 +2686,6 @@ export function runSplash({
         // Command routing
         if (trimmed === '/theme') {
           commandContext.openThemePicker();
-          return;
-        }
-
-        if (trimmed === '/mouse' || trimmed.startsWith('/mouse ')) {
-          const arg = trimmed.slice(6).trim();
-          commandContext.toggleMouse?.(arg);
           return;
         }
 
@@ -2630,10 +2758,10 @@ export function runSplash({
     disableWinQuickEdit();
 
     // UTF-8 mode, enter alternate screen buffer, hide cursor, enable bracketed paste.
-    out.write('\x1b%G\x1b[?1049h\x1b[?25l\x1b[?2004h');
-    if (mouseEnabled) {
-      out.write('\x1b[?1000h\x1b[?1002h\x1b[?1006h');
-    }
+    // Also enable Kitty keyboard protocol (push flags: 1 = report disambiguated keys, e.g. Shift+Enter)
+    // and xterm modifyOtherKeys mode 2 so terminals report modified keys like Shift+Enter as newlines.
+    // Mouse tracking is always on: full button/scroll/motion + SGR extended coords.
+    out.write('\x1b%G\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[>1u\x1b[>4;2m\x1b[?1000h\x1b[?1002h\x1b[?1006h');
     init();
     out.on('resize', init);
     process.on('exit', cleanup);

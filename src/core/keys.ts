@@ -36,7 +36,9 @@ export type KeyAction =
   | { type: 'paste'; text: string }
   | { type: 'char'; char: string }
   | { type: 'right-click'; x: number; y: number }
-  | { type: 'left-click'; x: number; y: number };
+  | { type: 'left-click'; x: number; y: number }
+  | { type: 'mouse-drag'; x: number; y: number }
+  | { type: 'mouse-up'; x: number; y: number };
 
 /**
  * Clean pasted text: normalize newlines to \n, strip non-printable control characters.
@@ -113,7 +115,16 @@ export function parseKeyActions(buf: Buffer | string): KeyAction[] {
       } else if (dir === 1) {
         actions.push({ type: 'wheel-down', x: mx, y: my });
       }
-    } else if (isPress) {
+    } else if (!isPress) {
+      // Mouse release (ends with lowercase 'm')
+      actions.push({ type: 'mouse-up', x: mx, y: my });
+    } else if ((rawBtn & 32) !== 0) {
+      // Mouse drag motion (button held down and moving across X and Y)
+      const btn = rawBtn & 3;
+      if (btn === 0 || btn === 1) {
+        actions.push({ type: 'mouse-drag', x: mx, y: my });
+      }
+    } else {
       const btn = rawBtn & 3; // mask lower 2 bits for button
       if (btn === 2) {
         actions.push({ type: 'right-click', x: mx, y: my });
@@ -153,6 +164,10 @@ export function parseKeyActions(buf: Buffer | string): KeyAction[] {
         } else if (dir === 1) {
           actions.push({ type: 'wheel-down', x: cx, y: cy });
         }
+      } else if ((cb & 3) === 3) {
+        actions.push({ type: 'mouse-up', x: cx, y: cy });
+      } else if ((cb & 32) !== 0) {
+        actions.push({ type: 'mouse-drag', x: cx, y: cy });
       } else {
         const btn = cb & 3;
         if (btn === 2) {
@@ -207,16 +222,79 @@ export function parseKeyActions(buf: Buffer | string): KeyAction[] {
       const rest = s.slice(i);
 
       // Shift+Enter / Alt+Enter / Ctrl+Enter: newline action
-      // CSI u: \x1b[13;<mod>u or \x1b[13;<mod>;<event>u (Kitty keyboard protocol)
-      const csiUEnterMatch = /^\x1b\[13;(\d+)(?:;\d+)?u/.exec(rest);
+      // CSI u: \x1b[13;<mod>u or \x1b[13;<mod>;<event>u or \x1b[13u (Kitty keyboard protocol)
+      const csiUEnterMatch = /^\x1b\[13(?:;(\d+))?(?:;(\d+))?u/.exec(rest);
       if (csiUEnterMatch) {
-        const mod = parseInt(csiUEnterMatch[1]!, 10);
+        const mod = csiUEnterMatch[1] ? parseInt(csiUEnterMatch[1], 10) : 1;
         if (mod > 1) {
           actions.push({ type: 'newline' });
         } else {
           actions.push({ type: 'enter' });
         }
         i += csiUEnterMatch[0].length;
+        continue;
+      }
+
+      // Windows Terminal / ConPTY win32-input-mode: \x1b[Vk;Sc;Uc;Kd;Cs;Rc_
+      const win32InputMatch = /^\x1b\[(\d+);(\d+);(\d+);(\d+);(\d+);(\d+)_/.exec(rest);
+      if (win32InputMatch) {
+        const vk = parseInt(win32InputMatch[1]!, 10);
+        const uc = parseInt(win32InputMatch[3]!, 10);
+        const kd = parseInt(win32InputMatch[4]!, 10);
+        const cs = parseInt(win32InputMatch[5]!, 10);
+        i += win32InputMatch[0].length;
+
+        // kd === 0 is key release -> ignore
+        if (kd === 1) {
+          const isShift = (cs & 0x0010) !== 0;
+          const isAlt   = (cs & 0x0003) !== 0;
+          const isCtrl  = (cs & 0x000c) !== 0;
+
+          if (vk === 13) {
+            // VK_RETURN: if Shift or Alt or Ctrl is held, newline; else enter
+            if (isShift || isAlt || isCtrl) {
+              actions.push({ type: 'newline' });
+            } else {
+              actions.push({ type: 'enter' });
+            }
+          } else if (vk === 38) {
+            // VK_UP
+            actions.push({ type: isShift ? 'shift-up' : (isCtrl ? 'ctrl-up' : 'up') });
+          } else if (vk === 40) {
+            // VK_DOWN
+            actions.push({ type: isShift ? 'shift-down' : (isCtrl ? 'ctrl-down' : 'down') });
+          } else if (vk === 37) {
+            actions.push({ type: 'left' });
+          } else if (vk === 39) {
+            actions.push({ type: 'right' });
+          } else if (vk === 27) {
+            actions.push({ type: 'esc' });
+          } else if (vk === 8) {
+            actions.push({ type: 'backspace' });
+          } else if (vk === 46) {
+            actions.push({ type: 'delete' });
+          } else if (vk === 9) {
+            actions.push({ type: 'tab' });
+          } else if (vk === 36) {
+            actions.push({ type: isCtrl ? 'ctrl-home' : 'home' });
+          } else if (vk === 35) {
+            actions.push({ type: isCtrl ? 'ctrl-end' : 'end' });
+          } else if (vk === 33) {
+            actions.push({ type: 'pgup' });
+          } else if (vk === 34) {
+            actions.push({ type: 'pgdn' });
+          } else if (isCtrl && (vk === 65 || vk === 97)) {
+            actions.push({ type: 'ctrl-a' });
+          } else if (isCtrl && (vk === 67 || vk === 99)) {
+            actions.push({ type: 'ctrl-c' });
+          } else if (isCtrl && (vk === 86 || vk === 118)) {
+            actions.push({ type: 'ctrl-v' });
+          } else if (isCtrl && (vk === 88 || vk === 120)) {
+            actions.push({ type: 'ctrl-x' });
+          } else if (uc >= 32) {
+            actions.push({ type: 'char', char: String.fromCharCode(uc) });
+          }
+        }
         continue;
       }
 
@@ -262,10 +340,15 @@ export function parseKeyActions(buf: Buffer | string): KeyAction[] {
         continue;
       }
 
-      // Keypad Enter in application mode / VT sequence
-      if (rest.startsWith('\x1bOM')) {
+      // Keypad Enter in application mode / VT sequence / Shift+Enter variants
+      if (rest.startsWith('\x1bOM') || rest.startsWith('\x1bO2M')) {
         actions.push({ type: 'newline' });
-        i += 3;
+        i += rest.startsWith('\x1bO2M') ? 4 : 3;
+        continue;
+      }
+      if (rest.startsWith('\x1b[1;2M') || rest.startsWith('\x1b[13;2F')) {
+        actions.push({ type: 'newline' });
+        i += rest.startsWith('\x1b[1;2M') ? 6 : 7;
         continue;
       }
 
@@ -422,8 +505,8 @@ export function parseKeyActions(buf: Buffer | string): KeyAction[] {
         continue;
       }
 
-      // Check for generic CSI sequence: \x1b\[[0-9;]*[a-zA-Z~]
-      const csiMatch = /^\x1b\[[0-9;]*[a-zA-Z~]/.exec(rest);
+      // Check for generic CSI sequence: \x1b\[[0-9;]*[a-zA-Z~_]
+      const csiMatch = /^\x1b\[[0-9;]*[a-zA-Z~_]/.exec(rest);
       if (csiMatch) {
         i += csiMatch[0].length;
         continue;

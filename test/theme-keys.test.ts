@@ -119,17 +119,12 @@ assert.strictEqual(loadSavedThemeId(), DEFAULT_THEME_ID);
 saveThemeId('red-eclipse');
 assert.strictEqual(loadSavedThemeId(), 'red-eclipse');
 
-// Mouse setting persistence
-import { loadSavedMouseEnabled, saveMouseEnabled } from '../src/core/themes.js';
-saveMouseEnabled(false);
-assert.strictEqual(loadSavedMouseEnabled(), false);
-saveMouseEnabled(true);
-assert.strictEqual(loadSavedMouseEnabled(), true);
+// Mouse setting persistence — removed (mouse is always enabled now)
 
 console.log('Testing Slash Commands Registry...');
-assert.strictEqual(COMMAND_REGISTRY.length, 5);
+assert.strictEqual(COMMAND_REGISTRY.length, 4);
 const cmdNames = COMMAND_REGISTRY.map(c => c.name);
-assert.deepStrictEqual(cmdNames, ['/theme', '/mouse', '/help', '/clear', '/exit']);
+assert.deepStrictEqual(cmdNames, ['/theme', '/help', '/clear', '/exit']);
 
 console.log('Testing Key Sequence Tokenizer...');
 
@@ -159,8 +154,8 @@ assert.deepStrictEqual(parseKeyActions('\x1b[1;5A'), [{ type: 'ctrl-up' }]);
 assert.deepStrictEqual(parseKeyActions('\x1b[1;5B'), [{ type: 'ctrl-down' }]);
 assert.deepStrictEqual(parseKeyActions('\x1b[1;5H'), [{ type: 'ctrl-home' }]);
 assert.deepStrictEqual(parseKeyActions('\x1b[1;5F'), [{ type: 'ctrl-end' }]);
-assert.deepStrictEqual(parseKeyActions('\x1b[<64;10;20M'), [{ type: 'wheel-up' }]);
-assert.deepStrictEqual(parseKeyActions('\x1b[<65;10;20M'), [{ type: 'wheel-down' }]);
+assert.deepStrictEqual(parseKeyActions('\x1b[<64;10;20M'), [{ type: 'wheel-up', x: 9, y: 19 }]);
+assert.deepStrictEqual(parseKeyActions('\x1b[<65;10;20M'), [{ type: 'wheel-down', x: 9, y: 19 }]);
 
 // Delete, Backspace, Tab, Enter, Ctrl-C
 assert.deepStrictEqual(parseKeyActions('\x1b[3~'), [{ type: 'delete' }]);
@@ -168,17 +163,16 @@ assert.deepStrictEqual(parseKeyActions('\x7f'), [{ type: 'backspace' }]);
 assert.deepStrictEqual(parseKeyActions('\x08'), [{ type: 'backspace' }]);
 assert.deepStrictEqual(parseKeyActions('\t'), [{ type: 'tab' }]);
 assert.deepStrictEqual(parseKeyActions('\r'), [{ type: 'enter' }]);
-assert.deepStrictEqual(parseKeyActions('\n'), [{ type: 'enter' }]);
+assert.deepStrictEqual(parseKeyActions('\n'), [{ type: 'newline' }]);
 assert.deepStrictEqual(parseKeyActions('\r\n'), [{ type: 'enter' }]);
 assert.deepStrictEqual(parseKeyActions('\x03'), [{ type: 'ctrl-c' }]);
 
 // Multiple keys in single buffer
-const multiKeys = parseKeyActions('\x1b[A\x1b[B\x1b\r');
+const multiKeys = parseKeyActions('\x1b[A\x1b[B\n');
 assert.deepStrictEqual(multiKeys, [
   { type: 'up' },
   { type: 'down' },
-  { type: 'esc' },
-  { type: 'enter' },
+  { type: 'newline' },
 ]);
 
 // Character typing
@@ -194,13 +188,13 @@ assert.deepStrictEqual(chars, [
 // Bracketed paste
 const bp = parseKeyActions('\x1b[200~function foo() {\n  return 1;\n}\x1b[201~');
 assert.deepStrictEqual(bp, [
-  { type: 'paste', text: 'function foo() {   return 1; }' },
+  { type: 'paste', text: 'function foo() {\n  return 1;\n}' },
 ]);
 
 // Unbracketed multi-line paste (should not trigger enter!)
 const rawPaste = parseKeyActions('first line\r\nsecond line\nthird line');
 assert.deepStrictEqual(rawPaste, [
-  { type: 'paste', text: 'first line second line third line' },
+  { type: 'paste', text: 'first line\nsecond line\nthird line' },
 ]);
 
 console.log('All tests passed successfully with original theme colors!');

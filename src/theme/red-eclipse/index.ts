@@ -25,16 +25,16 @@ export const redEclipse: ThemeTokens = {
   background:      '#080405',   // Deep obsidian with faint crimson undertone
   surface:         '#12080a',   // Dark bloodstone surface
   surfaceElevated: '#1c0c10',   // Elevated dark crimson container
-  border:          '#f2f2f2',   // Bone white border (LOGO_BODY)
+  border:          '#ff3b47',   // Hot red border (TAGLINE)
 
   // ── Typography ─────────────────────────────────────────────────────────────
   text:      '#f5f5f5',         // Crisp off-white primary text
   textMuted: '#c1121f',         // Blood red muted text (LOGO_SHADING)
 
   // ── Accents ────────────────────────────────────────────────────────────────
-  accent:       '#f2f2f2',      // Bone white primary       (LOGO_BODY)
+  accent:       '#ff3b47',      // Hot red primary accent   (TAGLINE)
   accentStrong: '#ffffff',      // Pure white strong accent (HEAD)
-  secondary:    '#ff3b47',      // Hot red secondary        (TAGLINE)
+  secondary:    '#f2f2f2',      // Bone white secondary     (LOGO_BODY)
 
   // ── Logo — 4-colour depth rendering ────────────────────────────────────────
   logo:       '#f2f2f2',        // Bone white — solid █ body          LOGO_BODY
@@ -56,9 +56,9 @@ export const redEclipse: ThemeTokens = {
   shimmer: '#ffffff',           // Pure white peak (HEAD)
 
   // ── Input bar ──────────────────────────────────────────────────────────────
-  inputBorder:      redEclipseTalk.user.border,       // Bone white dashed border
-  inputText:        redEclipseTalk.user.text,         // Hot red typed text
-  inputPlaceholder: '#c1121f',                         // Blood red placeholder (LOGO_SHADING)
+  inputBorder:      redEclipseTalk.user.border,       // Hot red dashed border
+  inputText:        redEclipseTalk.user.text,         // Bone white typed text
+  inputPlaceholder: '#a0a0a0',                         // Soft white placeholder
   cursor: '#ffffff',                                   // Pure white blinking cursor (HEAD)
 
   selection: '#c1121f',         // Blood red selection (LOGO_SHADING)

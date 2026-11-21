@@ -97,7 +97,19 @@ function NonTTYApp() {
     }
 
     // Shift + Enter / Linefeed: change line like WhatsApp instead of sending
-    if ((key.return && key.shift) || (ch === '\n' && !key.return)) {
+    const isShiftEnter =
+      (key.return && key.shift) ||
+      (ch === '\n' && !key.return) ||
+      Boolean(
+        ch &&
+        (ch.includes('\x1b[13;2u') ||
+         ch.includes('\x1b[27;2;13~') ||
+         ch.includes('\x1b[13;2~') ||
+         ch.includes('\x1b[1;2M') ||
+         ch.includes('\x1bO2M'))
+      );
+
+    if (isShiftEnter) {
       if (isSelectedAll) {
         setInput('\n');
         setIsSelectedAll(false);

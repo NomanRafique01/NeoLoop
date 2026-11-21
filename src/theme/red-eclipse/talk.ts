@@ -16,14 +16,14 @@ export type { TalkColorTokens };
 
 export const redEclipseTalk: TalkColorTokens = {
   user: {
-    prompt:    '#f2f2f2',   // Bone white  — '>' prompt symbol      (LOGO_BODY)
-    text:      '#ff3b47',   // Hot red     — user typed text & log  (TAGLINE)
+    prompt:    '#ff3b47',   // Hot red     — '>' prompt symbol      (TAGLINE)
+    text:      '#f2f2f2',   // Bone white  — user typed text & log  (LOGO_BODY)
     highlight: '#c1121f',   // Blood red   — selection highlight    (LOGO_SHADING)
-    border:    '#f2f2f2',   // Bone white  — input bar dashed border (LOGO_BODY)
+    border:    '#ff3b47',   // Hot red     — input bar dashed border (TAGLINE)
   },
   agent: {
     badge:  '#c1121f',      // Blood red   — [neoloop] badge        (LOGO_SHADING)
-    text:   '#ff3b47',      // Hot red     — agent response body    (TAGLINE)
+    text:   '#f2f2f2',      // Bone white  — agent response body    (LOGO_BODY)
     dim:    '#7a0c14',      // Deep crimson — dim / muted agent info
     accent: '#ffffff',      // Pure white  — agent tool/success accent (HEAD)
   },

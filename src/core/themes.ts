@@ -57,7 +57,6 @@ export function getThemeDisplayNameColor(theme: ThemeTokens): string {
 
 export interface NeoLoopConfig {
   theme?: string;
-  mouse?: boolean;
 }
 
 export function readConfigFile(): NeoLoopConfig {
@@ -107,21 +106,6 @@ export function saveThemeId(themeId: string): void {
   writeConfigFile({ theme: themeId });
 }
 
-export function loadSavedMouseEnabled(): boolean {
-  try {
-    const data = readConfigFile();
-    if (typeof data.mouse === 'boolean') {
-      return data.mouse;
-    }
-  } catch {
-    /* fallback to default */
-  }
-  return true; // Default: on
-}
-
-export function saveMouseEnabled(enabled: boolean): void {
-  writeConfigFile({ mouse: enabled });
-}
 
 export {
   parseHex,

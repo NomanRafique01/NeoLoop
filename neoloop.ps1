@@ -473,6 +473,10 @@ function Start-NeoLoop {
 
                 switch ($ki.Key) {
                     'Enter' {
+                        if (($ki.Modifiers -band [ConsoleModifiers]::Shift) -or ($ki.Modifiers -band [ConsoleModifiers]::Alt)) {
+                            $inputBuf += "`n"
+                            break
+                        }
                         $trimmed = $inputBuf.Trim()
                         if ($trimmed) {
                             $logs.Add("> $trimmed")
