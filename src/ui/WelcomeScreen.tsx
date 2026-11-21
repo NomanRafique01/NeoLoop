@@ -2,144 +2,148 @@
  * NeoLoop CLI — Welcome Screen with Terminal Input Bar
  *
  * Renders the post-splash welcome UI: a full-width terminal input bar that
- * appears immediately below the matrix animation zone. Matches the NEOLOOP
- * logo colour palette exactly — no alien colours introduced.
+ * appears immediately below the static ANSI banner (logo + tagline).
  *
- * Color palette (mirrors splash.ts):
- *   LOGO_BODY    #39ff6a  — primary neon green (prompt glyph, top/bottom borders)
- *   LOGO_SHADING #1f9e47  — dim green (placeholder, muted output lines)
- *   TAGLINE      #39FF88  — bright accent (typed text)
- *   HEAD         #d7ffe1  — near-white highlight (blinking cursor block)
+ * Color palette mirrors splash.ts exactly:
+ *   LOGO_BODY    #39ff6a  — borders, prompt ">"
+ *   LOGO_SHADING #1f9e47  — placeholder, history echo
+ *   TAGLINE      #39FF88  — user-typed text
+ *   HEAD         #d7ffe1  — blinking cursor block
  */
 
 import React, { useEffect, useState } from 'react';
-import { Box, Text } from 'ink';
+import { Box, Text, useStdout } from 'ink';
 
 // ---------------------------------------------------------------------------
-// Theme — single source of truth, matches splash.ts exactly
+// Theme — single source of truth, copied from splash.ts constants
 // ---------------------------------------------------------------------------
 const THEME = {
-  border:      '#39ff6a',  // LOGO_BODY  — top/bottom bar borders
-  prompt:      '#39ff6a',  // LOGO_BODY  — the ">" glyph
-  typed:       '#39FF88',  // TAGLINE    — user-typed text
-  placeholder: '#1f9e47',  // LOGO_SHADING — muted hint text
-  cursor:      '#d7ffe1',  // HEAD       — blinking block cursor
+  border:      '#39ff6a',  // LOGO_BODY    — top / bottom bar rules
+  prompt:      '#39ff6a',  // LOGO_BODY    — the ">" glyph
+  typed:       '#39FF88',  // TAGLINE      — user-typed text
+  placeholder: '#1f9e47',  // LOGO_SHADING — muted hint
+  cursor:      '#d7ffe1',  // HEAD         — blinking block
   history:     '#1f9e47',  // LOGO_SHADING — submitted-line echo
 } as const;
 
-const PLACEHOLDER = 'Type your message or ask NEDLOOP anything...';
-const CURSOR_INTERVAL_MS = 530;
+const PLACEHOLDER      = 'Type your message or ask NEDLOOP anything...';
+const CURSOR_BLINK_MS  = 530;
 
 // ---------------------------------------------------------------------------
-// Blinking cursor — solid block, toggles on the classic terminal cadence
+// Blinking solid cursor
 // ---------------------------------------------------------------------------
 function BlinkingCursor() {
-  const [visible, setVisible] = useState(true);
+  const [on, setOn] = useState(true);
 
   useEffect(() => {
-    const id = setInterval(() => setVisible(v => !v), CURSOR_INTERVAL_MS);
+    const id = setInterval(() => setOn(v => !v), CURSOR_BLINK_MS);
     return () => clearInterval(id);
   }, []);
 
-  // Always occupies one character cell so the layout stays stable
   return (
-    <Text backgroundColor={visible ? THEME.cursor : undefined} color={visible ? '#000000' : THEME.cursor}>
+    <Text
+      backgroundColor={on ? THEME.cursor : undefined}
+      color={on ? '#000000' : THEME.cursor}
+    >
       {' '}
     </Text>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Thin horizontal rule using box-drawing characters
-// ---------------------------------------------------------------------------
-function HRule({ color }: { color: string }) {
-  return (
-    <Box>
-      <Text color={color}>{'─'.repeat(1)}</Text>
-    </Box>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// History line — dim echo of a previously submitted command
+// History line — dim echo of a submitted command
 // ---------------------------------------------------------------------------
 function HistoryLine({ text }: { text: string }) {
   return (
     <Box paddingLeft={1}>
       <Text color={THEME.history} dimColor>
-        {'> '}
-        {text}
+        {'> '}{text}
       </Text>
     </Box>
   );
 }
 
 // ---------------------------------------------------------------------------
-// The input bar itself — top border / prompt / text / cursor / bottom border
+// InputBar — top border / prompt row / bottom border
 // ---------------------------------------------------------------------------
 interface InputBarProps {
-  value: string;
+  value:           string;
   showPlaceholder: boolean;
+  cols:            number;
 }
 
-function InputBar({ value, showPlaceholder }: InputBarProps) {
+function InputBar({ value, showPlaceholder, cols }: InputBarProps) {
+  // subtract 2 for the 1-char left + right padding inside the bar
+  const ruleWidth = Math.max(1, cols - 2);
+  const rule      = '─'.repeat(ruleWidth);
+
   return (
-    <Box flexDirection="column" width="100%">
+    <Box flexDirection="column">
+
       {/* ── top border ── */}
-      <Box width="100%">
-        <Text color={THEME.border}>
-          {'─'.repeat(Math.max(1, (process.stdout.columns || 80) - 1))}
-        </Text>
+      <Box paddingLeft={1} paddingRight={1}>
+        <Text color={THEME.border}>{rule}</Text>
       </Box>
 
-      {/* ── prompt row ── */}
-      <Box flexDirection="row" paddingLeft={1} paddingRight={1}>
-        {/* classic terminal ">" */}
+      {/* ── prompt row: > [placeholder OR typed text][cursor] ── */}
+      <Box flexDirection="row" paddingLeft={2} paddingRight={1}>
         <Text color={THEME.prompt} bold>{'> '}</Text>
 
-        {/* typed text or muted placeholder */}
         {showPlaceholder ? (
-          <Text color={THEME.placeholder}>{PLACEHOLDER}</Text>
+          /*
+           * Placeholder visible — cursor sits immediately after it.
+           * The moment the user types one character showPlaceholder flips
+           * to false and the placeholder disappears entirely.
+           */
+          <>
+            <Text color={THEME.placeholder}>{PLACEHOLDER}</Text>
+            <BlinkingCursor />
+          </>
         ) : (
-          <Text color={THEME.typed}>{value}</Text>
+          /*
+           * User is typing — show typed text in accent color followed by
+           * blinking cursor. No placeholder rendered at all.
+           */
+          <>
+            <Text color={THEME.typed}>{value}</Text>
+            <BlinkingCursor />
+          </>
         )}
-
-        {/* blinking solid cursor — only shown when no placeholder */}
-        {!showPlaceholder && <BlinkingCursor />}
-        {/* when placeholder is shown, still render cursor after it */}
-        {showPlaceholder && <BlinkingCursor />}
       </Box>
 
       {/* ── bottom border ── */}
-      <Box width="100%">
-        <Text color={THEME.border}>
-          {'─'.repeat(Math.max(1, (process.stdout.columns || 80) - 1))}
-        </Text>
+      <Box paddingLeft={1} paddingRight={1}>
+        <Text color={THEME.border}>{rule}</Text>
       </Box>
+
     </Box>
   );
 }
 
 // ---------------------------------------------------------------------------
-// WelcomeScreen — composes history + input bar
+// WelcomeScreen — history list + input bar
 // ---------------------------------------------------------------------------
 export interface WelcomeScreenProps {
-  input: string;
+  input:   string;
   history: string[];
 }
 
 export function WelcomeScreen({ input, history }: WelcomeScreenProps) {
-  const showPlaceholder = input.length === 0;
+  const { stdout } = useStdout();
+  // useStdout gives us the live stream; cols updates on terminal resize
+  const cols = stdout.columns ?? 80;
 
   return (
-    <Box flexDirection="column" width="100%">
-      {/* Submitted lines echoed above the input bar */}
+    <Box flexDirection="column">
       {history.map((line, idx) => (
         <HistoryLine key={idx} text={line} />
       ))}
 
-      {/* Terminal input bar — sits right where the matrix animation ended */}
-      <InputBar value={input} showPlaceholder={showPlaceholder} />
+      <InputBar
+        value={input}
+        showPlaceholder={input.length === 0}
+        cols={cols}
+      />
     </Box>
   );
 }

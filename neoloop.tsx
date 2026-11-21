@@ -7,7 +7,7 @@
  */
 import React, { useState } from 'react';
 import { render, useInput } from 'ink';
-import { runSplash } from './src/core/index.js';
+import { runSplash, printBanner } from './src/core/index.js';
 import { WelcomeScreen } from './src/ui/index.js';
 
 // ---------------------------------------------------------------------------
@@ -68,5 +68,9 @@ function App({ initialInput }: { initialInput: string }) {
 const firstKey = SKIP_SPLASH
   ? ''
   : await runSplash({ title: APP_NAME, tagline: TAGLINE });
+
+// After the alternate-buffer splash exits, re-print the logo statically on
+// the main buffer so it stays anchored above the Ink-managed input bar.
+if (!SKIP_SPLASH) printBanner(APP_NAME, TAGLINE);
 
 render(<App initialInput={firstKey} />);

@@ -315,6 +315,57 @@ function sgr(hexCode: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Static Banner — printed on the main buffer after splash exits
+// Anchors the logo in place so Ink renders the input bar directly below it.
+// ---------------------------------------------------------------------------
+
+/** ANSI SGR for a hex color string, inlined to keep this self-contained. */
+function ansiRgb(hex: string, bold = false): string {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `\x1b[${bold ? '1;' : '0;'}38;2;${r};${g};${b}m`;
+}
+const RESET = '\x1b[0m';
+
+/**
+ * Print a static ANSI rendering of the logo + tagline directly to stdout on
+ * the main screen buffer.  Call this once after runSplash() resolves so the
+ * logo stays anchored at the top while Ink renders the input bar below.
+ */
+export function printBanner(title: string, tagline: string): void {
+  const out = process.stdout;
+  const W   = Math.max(20, (out.columns || 80) - 1);
+
+  const big = bigLogo(title);
+
+  if (big && big[0]!.length + 6 <= W) {
+    const x0  = Math.max(0, Math.floor((W - big[0]!.length) / 2));
+    const pad = ' '.repeat(x0);
+
+    out.write('\n');
+    for (const row of big) {
+      let line = pad;
+      for (let k = 0; k < row.length; k++) {
+        const c = row[k]!;
+        if      (c === '█') line += ansiRgb(LOGO_BODY) + c + RESET;
+        else if (c !== ' ') line += ansiRgb(LOGO_SHADING) + c + RESET;
+        else                line += c;
+      }
+      out.write(line + '\n');
+    }
+
+    // tagline centered, bold bright green
+    const x0_tag = Math.max(0, Math.floor((W - tagline.length) / 2));
+    out.write('\n' + ' '.repeat(x0_tag) + ansiRgb(TAGLINE_COLOR, true) + tagline + RESET + '\n\n');
+  } else {
+    // narrow terminal fallback
+    out.write('\n' + ansiRgb(LOGO_BODY, true) + title.toUpperCase() + RESET + '\n');
+    out.write(ansiRgb(TAGLINE_COLOR, true) + tagline + RESET + '\n\n');
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main Splash Lifecycle
 // ---------------------------------------------------------------------------
 export function runSplash({
